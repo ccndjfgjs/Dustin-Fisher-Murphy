@@ -48,6 +48,7 @@ class AgentEngine {
         autoApprove: Boolean,
         maxIterations: Int,
         systemAppend: String,
+        streaming: Boolean,
         listener: Listener
     ) {
         val ai = AiClients.create(provider)
@@ -67,7 +68,8 @@ class AgentEngine {
                     messages = messages,
                     tools = Tools.specs,
                     temperature = 0.2,
-                    maxTokens = 8192
+                    maxTokens = 8192,
+                    stream = streaming
                 )
                 val response = ai.complete(request) { delta -> listener.onAssistantDelta(delta) }
 

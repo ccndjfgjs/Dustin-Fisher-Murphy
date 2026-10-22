@@ -272,6 +272,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     autoApprove = settings.autoApproveTools,
                     maxIterations = settings.maxIterations,
                     systemAppend = settings.systemAppend,
+                    streaming = settings.streaming,
                     listener = agentListener
                 )
             } catch (c: kotlinx.coroutines.CancellationException) {

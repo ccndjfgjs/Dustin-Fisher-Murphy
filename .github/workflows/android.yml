@@ -3,6 +3,7 @@ name: Build APK
 on:
   push:
     branches: [ main, 'arena/**' ]
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
@@ -35,7 +36,10 @@ jobs:
           ./gradlew :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee build.log
 
       - name: Publish failure log (issue)
-        if: steps.build.outcome == 'failure'
+        if: >-
+          steps.build.outcome == 'failure' &&
+          (github.event_name == 'workflow_dispatch' ||
+           contains(github.event.head_commit.message, '[ci-log]'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -45,11 +49,6 @@ jobs:
             echo
             echo '```'
             grep -nE "(^e: |error:|FAILURE:|What went wrong|Caused by:|Execution failed|> Task .*FAILED)" -A 4 build.log | tail -n 800 || true
-            echo '```'
-            echo
-            echo 'Tail:'
-            echo '```'
-            tail -n 120 build.log
             echo '```'
           } > body.md
           gh issue create --title "CI failure log #$GITHUB_RUN_ID" --body-file body.md
@@ -65,3 +64,24 @@ jobs:
       - name: Fail if build failed
         if: steps.build.outcome == 'failure'
         run: exit 1
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: opencode-mobile-debug
+          path: apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" apk/app-debug.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "OpenCode Mobile $GITHUB_REF_NAME" \
+            --notes "Debug APK. Установка: adb install -r app-debug.apk"

@@ -60,6 +60,12 @@ Kotlin + Jetpack Compose, без серверной части: весь аге�
 1. Открой вкладку **Actions** → workflow **Build APK**.
 2. Возьми артефакт **opencode-mobile-debug** — внутри `app-debug.apk`.
 
+Для публичной сборки поставь тег — APK прикрепится к GitHub Release:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ### Локально
 Нужны JDK 17 и Android SDK (compileSdk 35).
 

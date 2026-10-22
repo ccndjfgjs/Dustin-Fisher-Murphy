@@ -30,7 +30,8 @@ data class AiRequest(
     val messages: List<AiMessage>,
     val tools: List<ToolSpec>,
     val temperature: Double = 0.2,
-    val maxTokens: Int = 8192
+    val maxTokens: Int = 8192,
+    val stream: Boolean = true
 )
 
 data class AiResponse(
@@ -109,7 +110,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
     private fun buildPayload(req: AiRequest): JSONObject {
         val root = JSONObject()
         root.put("model", req.model)
-        root.put("stream", true)
+        root.put("stream", req.stream)
         root.put("temperature", req.temperature)
         root.put("max_tokens", req.maxTokens)
         val messages = JSONArray()
@@ -277,17 +278,47 @@ class AnthropicClient(private val provider: Provider) : AiClient {
                     val err = runCatching { body.string() }.getOrDefault("")
                     throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
                 }
-                parseStream(body.source(), onDelta)
+                if (req.stream) {
+                    parseStream(body.source(), onDelta)
+                } else {
+                    parseAnthropicJson(body.string())
+                }
             }
         } finally {
             currentCall = null
         }
     }
 
+    private fun parseAnthropicJson(raw: String): AiResponse {
+        if (raw.isBlank()) throw AiException("Пустой ответ модели")
+        val obj = runCatching { JSONObject(raw) }.getOrElse { throw AiException("Не удалось разобрать ответ: ${raw.take(300)}") }
+        if (obj.optString("type") == "error") {
+            throw AiException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка API")
+        }
+        val content = StringBuilder()
+        val calls = mutableListOf<AiToolCall>()
+        obj.optJSONArray("content")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val block = arr.optJSONObject(i) ?: continue
+                when (block.optString("type")) {
+                    "text" -> content.append(block.optString("text", ""))
+                    "tool_use" -> calls.add(
+                        AiToolCall(
+                            id = block.optString("id", "toolu_$i"),
+                            name = block.optString("name", ""),
+                            arguments = block.optJSONObject("input")?.toString() ?: "{}"
+                        )
+                    )
+                }
+            }
+        }
+        return AiResponse(content.toString(), calls, obj.optString("stop_reason"))
+    }
+
     private fun buildPayload(req: AiRequest): JSONObject {
         val root = JSONObject()
         root.put("model", req.model)
-        root.put("stream", true)
+        root.put("stream", req.stream)
         root.put("max_tokens", req.maxTokens)
         root.put("temperature", req.temperature)
         if (req.system.isNotBlank()) root.put("system", req.system)
