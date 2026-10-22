@@ -426,15 +426,17 @@ object Tools {
             .onEnter { it.name !in ignoredDirs || it == base }
             .filter { it.isFile && it.length() < 2_000_000 }
             .toList()
-        outer@ for (f in files) {
+        var stop = false
+        for (f in files) {
+            if (stop) break
             if (includeRegex != null && !includeRegex.matches(f.name)) continue
             val text = runCatching { f.readText() }.getOrNull() ?: continue
             if (text.contains('\u0000')) continue
             text.lineSequence().forEachIndexed { idx, line ->
-                if (regex.containsMatchIn(line)) {
+                if (!stop && regex.containsMatchIn(line)) {
                     out.append(f.absolutePath).append(':').append(idx + 1).append(": ").append(line.trim()).append('\n')
                     found++
-                    if (found >= max) return@outer
+                    if (found >= max) stop = true
                 }
             }
         }
