@@ -11,12 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -25,13 +26,42 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build debug APK
+        id: build
+        continue-on-error: true
+        shell: bash
         run: |
+          set -o pipefail
           chmod +x ./gradlew
-          ./gradlew :app:assembleDebug --stacktrace
+          ./gradlew :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee build.log
+
+      - name: Publish failure log (issue)
+        if: steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          {
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo '```'
+            grep -nE "(^e: |error:|FAILURE:|What went wrong|Caused by:|Execution failed|> Task .*FAILED)" -A 4 build.log | tail -n 800 || true
+            echo '```'
+            echo
+            echo 'Tail:'
+            echo '```'
+            tail -n 120 build.log
+            echo '```'
+          } > body.md
+          gh issue create --title "CI failure log #$GITHUB_RUN_ID" --body-file body.md
 
       - name: Upload APK
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: opencode-mobile-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Fail if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1
