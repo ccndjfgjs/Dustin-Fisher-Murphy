@@ -1,0 +1,231 @@
+package dev.opencode.mobile.agent
+
+import dev.opencode.mobile.ai.AiClient
+import dev.opencode.mobile.ai.AiClients
+import dev.opencode.mobile.ai.AiMessage
+import dev.opencode.mobile.ai.AiRequest
+import dev.opencode.mobile.ai.AiToolCall
+import dev.opencode.mobile.data.ChatMessage
+import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.Role
+import dev.opencode.mobile.data.TodoItem
+import dev.opencode.mobile.data.ToolCallRef
+import dev.opencode.mobile.shell.Shell
+import dev.opencode.mobile.tools.ToolContext
+import dev.opencode.mobile.tools.ToolOutcome
+import dev.opencode.mobile.tools.Tools
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+
+class AgentEngine {
+
+    interface Listener {
+        fun onStatus(text: String)
+        fun onAssistantStart()
+        fun onAssistantDelta(text: String)
+        fun onAssistantDone(message: ChatMessage)
+        fun onToolStart(call: ToolCallRef)
+        fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String)
+        fun onTodo(items: List<TodoItem>)
+        fun onCommandOutputChunk(chunk: String)
+        suspend fun approve(call: ToolCallRef): Boolean
+    }
+
+    private var client: AiClient? = null
+
+    fun cancel() {
+        runCatching { client?.cancel() }
+    }
+
+    suspend fun run(
+        provider: Provider,
+        model: String,
+        history: List<ChatMessage>,
+        cwd: String,
+        canUseRoot: Boolean,
+        autoApprove: Boolean,
+        maxIterations: Int,
+        systemAppend: String,
+        streaming: Boolean,
+        listener: Listener
+    ) {
+        val ai = AiClients.create(provider)
+        client = ai
+        try {
+            val useRoot = canUseRoot && withContext(Dispatchers.IO) { Shell.rootAvailable() }
+            val system = withContext(Dispatchers.IO) { buildSystemPrompt(cwd, useRoot, systemAppend) }
+            val messages = mutableListOf<AiMessage>()
+            messages.addAll(toAiMessages(trimHistory(history)))
+            var iterations = maxIterations.coerceIn(1, 100)
+            while (iterations-- > 0) {
+                listener.onStatus("Думаю…")
+                listener.onAssistantStart()
+                val request = AiRequest(
+                    model = model,
+                    system = system,
+                    messages = messages,
+                    tools = Tools.specs,
+                    temperature = 0.2,
+                    maxTokens = 8192,
+                    stream = streaming
+                )
+                val response = ai.complete(request) { delta -> listener.onAssistantDelta(delta) }
+
+                val assistantMsg = ChatMessage(
+                    role = Role.ASSISTANT,
+                    content = response.content,
+                    toolCalls = response.toolCalls.map { ToolCallRef(it.id, it.name, it.arguments) }
+                )
+                listener.onAssistantDone(assistantMsg)
+                messages.add(
+                    AiMessage(
+                        role = "assistant",
+                        content = response.content,
+                        toolCalls = response.toolCalls
+                    )
+                )
+
+                if (response.toolCalls.isEmpty()) {
+                    listener.onStatus("")
+                    return
+                }
+
+                for (call in response.toolCalls) {
+                    val callRef = ToolCallRef(call.id, call.name, call.arguments)
+                    val args = parseArgs(call.arguments)
+                    listener.onToolStart(callRef)
+                    listener.onStatus("Инструмент: ${call.name}")
+
+                    val allowed = if (!autoApprove && call.name !in Tools.readOnly) {
+                        listener.approve(callRef)
+                    } else {
+                        true
+                    }
+
+                    if (!allowed) {
+                        val denied = ToolOutcome(false, "Пользователь отклонил выполнение инструмента ${call.name}.", "Отклонено")
+                        listener.onToolEnd(callRef, false, denied.output)
+                        messages.add(
+                            AiMessage(
+                                role = "tool",
+                                content = denied.output,
+                                toolCallId = call.id,
+                                toolName = call.name
+                            )
+                        )
+                        continue
+                    }
+
+                    val ctx = ToolContext(
+                        cwd = cwd,
+                        useRoot = useRoot,
+                        sandboxed = !useRoot,
+                        onChunk = { chunk -> listener.onCommandOutputChunk(chunk) },
+                        onTodo = { items -> listener.onTodo(items) }
+                    )
+                    val outcome = Tools.execute(call.name, args, ctx)
+                    listener.onToolEnd(callRef, outcome.ok, outcome.output)
+                    messages.add(
+                        AiMessage(
+                            role = "tool",
+                            content = clamp(outcome.output, 16000),
+                            toolCallId = call.id,
+                            toolName = call.name
+                        )
+                    )
+                }
+                listener.onStatus("")
+            }
+            listener.onStatus("Достигнут лимит шагов агента (${maxIterations}).")
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            val text = t.message ?: t.javaClass.simpleName
+            listener.onAssistantDone(
+                ChatMessage(
+                    role = Role.ASSISTANT,
+                    content = "⚠️ Ошибка: $text"
+                )
+            )
+            listener.onStatus("")
+        } finally {
+            client = null
+        }
+    }
+
+    private fun parseArgs(raw: String): JSONObject = runCatching {
+        JSONObject(raw.ifBlank { "{}" })
+    }.getOrElse { JSONObject() }
+
+    private fun clamp(text: String, limit: Int): String =
+        if (text.length <= limit) text else text.take(limit) + "\n… [вывод обрезан, ${text.length - limit} символов]"
+
+    private fun trimHistory(history: List<ChatMessage>): List<ChatMessage> {
+        if (history.size <= 40) return history
+        var start = history.size - 40
+        while (start < history.size && history[start].role != Role.USER) start++
+        return if (start >= history.size) history.takeLast(40) else history.subList(start, history.size).toList()
+    }
+
+    private fun toAiMessages(history: List<ChatMessage>): List<AiMessage> {
+        val out = mutableListOf<AiMessage>()
+        for (m in history) {
+            when (m.role) {
+                Role.USER -> out.add(AiMessage(role = "user", content = m.content))
+                Role.ASSISTANT -> {
+                    if (m.toolCalls.isEmpty() && m.content.isBlank()) continue
+                    out.add(
+                        AiMessage(
+                            role = "assistant",
+                            content = m.content,
+                            toolCalls = m.toolCalls.map { AiToolCall(it.id, it.name, it.arguments) }
+                        )
+                    )
+                }
+                Role.TOOL -> out.add(
+                    AiMessage(
+                        role = "tool",
+                        content = clamp(m.content, 16000),
+                        toolCallId = m.toolCallId,
+                        toolName = m.toolName
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    private fun buildSystemPrompt(cwd: String, useRoot: Boolean, append: String): String {
+        val rootStatus = Shell.rootStatus()
+        val sb = StringBuilder()
+        sb.append(
+            """
+            Ты — opencode, автономный ИИ-агент для программирования внутри Android-приложения OpenCode Mobile.
+            Ты работаешь прямо в файловой системе телефона и можешь выполнять shell-команды.
+
+            Окружение:
+            - Рабочая папка проекта: $cwd
+            - Платформа: Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT}), ${android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64"}
+            - Инструменты запускаются: ${if (useRoot) "от root (su доступен, uid=0)" else "от обычного uid приложения"}
+            - Root: ${if (rootStatus.available) "да, ${rootStatus.manager} ${rootStatus.version}" else "нет"}
+
+            Правила работы:
+            1. Сначала исследуй проект инструментами (list_dir, glob, grep, read_file), не выдумывай код вслепую.
+            2. Для правок используй edit_file (точечно) и write_file (новые файлы / полная перезапись).
+            3. После изменений проверяй результат: запускай сборку, тесты, линтеры через run_command.
+            4. Если команда упала — читай ошибку и исправляй, не сдавайся после первой попытки.
+            5. Действуй сам, без лишних вопросов; спрашивай только при реальной неоднозначности.
+            6. Опасные и разрушительные команды (rm -rf /, dd по разделам, wipe) не выполняй без явного разрешения.
+            7. Для многошаговых задач веди todo_write.
+            8. Отвечай кратко, на языке пользователя. Код — в блоках с указанием языка.
+            9. Не печатай секреты (API-ключи) в ответах.
+            """.trimIndent()
+        )
+        if (append.isNotBlank()) {
+            sb.append("\n\nДополнительные инструкции пользователя:\n").append(append)
+        }
+        return sb.toString()
+    }
+}
