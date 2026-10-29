@@ -90,7 +90,7 @@ class ChatUiTest {
         rule.onNodeWithText("Добавить или настроить провайдера").performClick()
         rule.onNodeWithTag("provider-search").performTextInput("Alibaba Cloud Coding")
         rule.onNodeWithText("Alibaba Cloud · Coding Plan").assertIsDisplayed().performClick()
-        rule.onNodeWithTag("provider-url").assertTextContains("coding-intl.dashscope.aliyuncs.com")
+        rule.onNodeWithTag("provider-url").assertTextContains("coding-intl.dashscope.aliyuncs.com", substring = true)
         rule.onNodeWithText("Отмена").performClick()
         rule.onNodeWithContentDescription("Чат").performClick()
         rule.onNodeWithTag("chat-input").assertTextContains("Мой черновик")

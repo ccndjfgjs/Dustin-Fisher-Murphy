@@ -11,57 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  inspect-test-results:
-    if: contains(github.event.head_commit.message, '[diagnostic]')
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    strategy:
-      matrix:
-        api-level: [24, 35]
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: emulator-results-api-${{ matrix.api-level }}
-          run-id: 40846505001
-          github-token: ${{ github.token }}
-      - name: Report failures from saved test results
-        shell: bash
-        run: |
-          python3 - <<'PYREPORT'
-          from pathlib import Path
-          from html.parser import HTMLParser
-          import re
-          class PreBlocks(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.inside, self.blocks, self.current = False, [], []
-              def handle_starttag(self, tag, attrs):
-                  if tag == 'pre': self.inside, self.current = True, []
-              def handle_endtag(self, tag):
-                  if tag == 'pre' and self.inside:
-                      self.blocks.append(''.join(self.current)); self.inside = False
-              def handle_data(self, data):
-                  if self.inside: self.current.append(data)
-          def note(text):
-              print('::notice::' + text[:8000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
-          files = list(Path('.').rglob('*'))
-          note('Extracted files: ' + ', '.join(str(f) for f in files if f.is_file())[:7000])
-          for file in files:
-              if file.suffix == '.html' and 'ChatUiTest' in file.name:
-                  parser = PreBlocks()
-                  parser.feed(file.read_text(encoding='utf-8', errors='replace'))
-                  for block in parser.blocks:
-                      note(str(file) + '\n' + block)
-              if file.name == 'emulator-test.log':
-                  lines = file.read_text(encoding='utf-8', errors='replace').splitlines()
-                  for i, line in enumerate(lines):
-                      if 'ChatUiTest' in line and 'FAILED' in line:
-                          note('\n'.join(lines[i:i+30]))
-          PYREPORT
   build:
-    if: "!contains(github.event.head_commit.message, '[diagnostic]')"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -193,12 +143,12 @@ jobs:
           import re, sys
           lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
           matches = [line for line in lines if re.search(r'(^e: |^error:|^FAILURE:|^\* What went wrong|^> Task .*FAILED|^Caused by:|Execution failed for task|FAILED|Exception)', line)]
-          for line in matches[-30:]:
+          failures = [index for index, line in enumerate(lines) if re.search(r' > .+\[emulator-.+\].*FAILED', line)]
+          for index in failures[:4]:
+              detail = '\n'.join(lines[index:index + 18])[:3000]
+              print('::error::' + detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          for line in matches[-3:]:
               print('::error::' + line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')[:1200])
-          for index, line in enumerate(lines):
-              if re.search(r' > .+\[emulator-.+\].*FAILED', line):
-                  detail = '\n'.join(lines[index:index + 18])[:3000]
-                  print('::error::' + detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
           PY
           else
             echo '::error::The emulator did not start. See the emulator action log.'

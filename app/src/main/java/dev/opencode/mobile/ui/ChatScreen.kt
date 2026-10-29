@@ -63,6 +63,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -91,6 +92,7 @@ import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
 import dev.opencode.mobile.data.TodoItem
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import java.io.File
 
 private val ChatPanel = Color(0xFF1A1E28)
@@ -105,10 +107,12 @@ fun ChatScreen(vm: AppViewModel) {
         it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.toolCalls.isNotEmpty()
     }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     var showSessions by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
     var followLatest by remember(session?.id) { mutableStateOf(true) }
     var autoScrolling by remember(session?.id) { mutableStateOf(false) }
+    var wasBusy by remember(session?.id) { mutableStateOf(ui.busy) }
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     val nearBottom by remember(listState) {
         derivedStateOf {
@@ -135,8 +139,32 @@ fun ChatScreen(vm: AppViewModel) {
             }
         }
     }
-    LaunchedEffect(session?.id, messages.size, followLatest, dragging) {
-        if (messages.isNotEmpty() && followLatest && !dragging) {
+    LaunchedEffect(session?.id) {
+        if (messages.isNotEmpty()) {
+            // Restore a saved conversation at its latest message when opening it.
+            autoScrolling = true
+            try {
+                listState.scrollToItem(messages.lastIndex)
+                listState.scrollBy(1_000_000f)
+            } finally {
+                autoScrolling = false
+            }
+        }
+    }
+    LaunchedEffect(ui.busy, session?.id) {
+        if (wasBusy && !ui.busy && followLatest && !dragging && messages.isNotEmpty()) {
+            autoScrolling = true
+            try {
+                listState.scrollToItem(messages.lastIndex)
+                listState.scrollBy(1_000_000f)
+            } finally {
+                autoScrolling = false
+            }
+        }
+        wasBusy = ui.busy
+    }
+    LaunchedEffect(session?.id, messages.size, followLatest, dragging, ui.busy) {
+        if (ui.busy && messages.isNotEmpty() && followLatest && !dragging) {
             // Observe layout, not just message count: a streamed message can grow beyond the viewport.
             snapshotFlow { listState.layoutInfo }.collect { info ->
                 if (info.totalItemsCount == messages.size) {
@@ -188,7 +216,18 @@ fun ChatScreen(vm: AppViewModel) {
                 }
                 if (!followLatest) {
                     IconButton(
-                        onClick = { followLatest = true },
+                        onClick = {
+                            followLatest = true
+                            scope.launch {
+                                autoScrolling = true
+                                try {
+                                    listState.scrollToItem(messages.lastIndex)
+                                    listState.scrollBy(1_000_000f)
+                                } finally {
+                                    autoScrolling = false
+                                }
+                            }
+                        },
                         modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)
                             .background(SurfaceHigh, CircleShape)
                     ) {
