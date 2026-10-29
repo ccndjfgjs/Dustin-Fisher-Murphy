@@ -35,7 +35,7 @@ Debug-приложение имеет отдельный пакет `dev.opencod
 
 ### Alibaba Cloud и другие API
 
-Каталог включает Alibaba Cloud Model Studio, Alibaba Coding Plan (разные регионы и тарифы), DeepSeek, Google Gemini, Groq, Mistral и прежние шаблоны. **Model Studio оплачивается по использованию; Coding Plan имеет отдельные адрес, ключ и подписку.** Проверьте регион ключа, условия использования приложения и стоимость у Alibaba: выбор неправильного endpoint может привести к отдельной оплате. Шаблоны и ссылки на официальные документы — в [docs/PROVIDERS.md](docs/PROVIDERS.md).
+Каталог включает Alibaba Cloud Model Studio, Alibaba Coding Plan (разные регионы и тарифы), Dahl Inference, Space Bunny, AgentRouter, DeepSeek, Google Gemini, Groq, Mistral и прежние шаблоны. **Model Studio оплачивается по использованию; Coding Plan имеет отдельные адрес, ключ и подписку.** Проверьте регион ключа, условия использования приложения и стоимость у Alibaba: выбор неправильного endpoint может привести к отдельной оплате. У Space Bunny предоплатный API; для Dahl нужно выделить токены ключу. AgentRouter предлагается отдельно для OpenAI-совместимых моделей и Anthropic/Claude. Шаблоны, ограничения и ссылки на официальные документы — в [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
 Наличие шаблона не гарантирует доступность модели или совместимость каждого API с инструментами агента. Провайдеры меняют ID моделей, ограничения и требования к reasoning. Для официального DeepSeek, а также Qwen3.7/3.6/3.5 Plus на поддерживаемых Alibaba endpoints, запросы используют режим без thinking; для других reasoning-моделей поддержка не гарантируется. Реальные внешние API в автоматических тестах не вызываются.
 

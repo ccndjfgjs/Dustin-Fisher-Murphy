@@ -19,6 +19,23 @@
 
 Документация: [адреса Model Studio](https://help.aliyun.com/en/model-studio/base-url), [Coding Plan](https://help.aliyun.com/en/model-studio/coding-plan), [международный Coding Plan / DeepSeek Harness](https://help.aliyun.com/en/model-studio/deepseek-harness), [режим thinking](https://help.aliyun.com/en/model-studio/deep-thinking).
 
+## Dahl Inference, Space Bunny и AgentRouter
+
+Это **шаблоны для самостоятельного подключения**, а не уже настроенные аккаунты. Адрес и ID моделей можно изменить перед сохранением и позже. Набор моделей и права доступа могут меняться; проверяйте их и условия оплаты в кабинете сервиса.
+
+| Шаблон | Base URL | Примеры моделей и подключение |
+|---|---|---|
+| Dahl Inference | `https://inference.dahl.global/v1` | `MiniMaxAI/MiniMax-M2.7`, `deepseek-ai/DeepSeek-V4-Flash-0731`, `zai-org/GLM-5.3-Flash`. Создайте ключ и выделите ему токены через Allocate в [кабинете](https://inference.dahl.global/account#profile); сверяйте ID с публичным [списком моделей](https://inference.dahl.global/v1/models). |
+| Space Bunny | `https://spacebunnymodel.com/api/v1` | `space-bunny-alpha`; `space-bunny-flash` указан в примере интеграции. Ключ `sb_live_` создаётся в [dashboard](https://spacebunnymodel.com/dashboard); API по документации предоплатный, проверьте баланс и актуальный тариф. |
+| AgentRouter · OpenAI | `https://agentrouter.org/v1` | OpenAI Chat Completions: `deepseek-v4-flash`, `glm-5.3`. Получите ключ в [кабинете](https://agentrouter.org/console), проверьте доступность моделей и тарификацию. |
+| AgentRouter · Anthropic | `https://agentrouter.org` | Anthropic Messages: `claude-opus-5`, `claude-opus-4-8`. Сервис рекомендует Anthropic для Claude Opus; в этом шаблоне адрес **без** `/v1` — приложение добавит `/v1/messages`. |
+
+Если используются оба шаблона AgentRouter, ключ нужно ввести в настройках каждого отдельно; приложение не копирует ключи между провайдерами. Выбор шаблона не делает сетевых запросов и не перезаписывает существующих провайдеров.
+
+Источники: [Dahl API](https://inference.dahl.global/docs/api/) и [OpenCode setup](https://inference.dahl.global/docs/opencode/); [Space Bunny API key](https://spacebunnymodel.com/get-api-key) и [OpenCode integration](https://spacebunnymodel.com/integrations/opencode); [AgentRouter OpenCode](https://agentrouter.org/docs/opencode.html) и [Cline](https://agentrouter.org/docs/cline.html).
+
+**Ограничение для новых сервисов:** авторизованные запросы к ним не проверялись. Приложение не сохраняет и не передаёт обратно `reasoning_content` и не отображает отдельное поле рассуждений Space Bunny. Некоторые reasoning-модели могут требовать эти данные при продолжении вызовов инструментов; кроме того, не каждый OpenAI-совместимый шлюз передаёт инструменты. Поэтому рабочий агентский цикл не гарантируется даже при успешном обычном чате. Тарифы и поддержка конкретной модели зависят от выбранного сервиса.
+
 ## Особенности совместимости
 
 - Официальный [DeepSeek Chat Completions](https://api-docs.deepseek.com/guides/tool_calls/) использует thinking по умолчанию. Агент пока не сохраняет и не передаёт `reasoning_content`, поэтому при запросах **к `api.deepseek.com`** отправляется `thinking.type=disabled`. Это режим без рассуждений; внутренние рассуждения не отображаются.

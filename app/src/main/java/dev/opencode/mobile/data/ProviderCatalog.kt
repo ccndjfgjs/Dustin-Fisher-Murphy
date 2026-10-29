@@ -79,6 +79,43 @@ object ProviderCatalog {
             note = "Нужен ключ Coding Plan (sk-sp-…) и подписка для Китая. Проверьте правила тарифа и поддержку приложения. Для Qwen3.7/3.6/3.5 Plus используется режим без thinking."
         ),
         ProviderPreset(
+            id = "dahl",
+            name = "Dahl Inference",
+            description = "Dahl · OpenAI-совместимый API",
+            baseUrl = "https://inference.dahl.global/v1",
+            model = "MiniMaxAI/MiniMax-M2.7",
+            extraModels = listOf("deepseek-ai/DeepSeek-V4-Flash-0731", "zai-org/GLM-5.3-Flash"),
+            note = "Нужен ключ Dahl с выделенными ему токенами. Модели могут меняться — проверьте ID в кабинете или /v1/models. Некоторые reasoning-модели могут не работать с инструментами; реальный API не проверен."
+        ),
+        ProviderPreset(
+            id = "space-bunny",
+            name = "Space Bunny",
+            description = "Space Bunny Model · API с предоплатой",
+            baseUrl = "https://spacebunnymodel.com/api/v1",
+            model = "space-bunny-alpha",
+            extraModels = listOf("space-bunny-flash"),
+            note = "Используйте ключ sb_live_ из своего dashboard и проверьте баланс и тариф. Внутренние рассуждения не отображаются; работа инструментов через этот API не проверена."
+        ),
+        ProviderPreset(
+            id = "agentrouter-openai",
+            name = "AgentRouter · OpenAI",
+            description = "AgentRouter · OpenAI Chat Completions",
+            baseUrl = "https://agentrouter.org/v1",
+            model = "deepseek-v4-flash",
+            extraModels = listOf("glm-5.3"),
+            note = "Нужен ключ AgentRouter. Сверяйте модели и тарифы с кабинетом. Для Claude Opus выберите AgentRouter · Anthropic. Некоторые reasoning-модели могут не работать с инструментами."
+        ),
+        ProviderPreset(
+            id = "agentrouter-anthropic",
+            name = "AgentRouter · Anthropic",
+            description = "AgentRouter · Claude через Messages API",
+            kind = "anthropic",
+            baseUrl = "https://agentrouter.org",
+            model = "claude-opus-5",
+            extraModels = listOf("claude-opus-4-8"),
+            note = "Нужен ключ AgentRouter. Для Claude Opus сервис рекомендует Anthropic Messages; URL здесь без /v1. Проверьте доступность и тариф в кабинете; работа агента через шлюз не проверена."
+        ),
+        ProviderPreset(
             id = "deepseek",
             name = "DeepSeek",
             description = "DeepSeek API · программирование и чат",

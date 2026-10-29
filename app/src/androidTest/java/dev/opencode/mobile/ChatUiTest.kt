@@ -83,6 +83,18 @@ class ChatUiTest {
         }
     }
 
+    @Test fun agentRouterAnthropicCanBeFoundFromChatAndPrefillsItsOwnProtocol() {
+        dismissStoragePrompt()
+        rule.onNodeWithContentDescription("Выбрать модель").performClick()
+        rule.onNodeWithText("Добавить или настроить провайдера").performClick()
+        rule.onNodeWithTag("provider-search").performTextInput("agentrouter anthropic")
+        rule.onNodeWithText("AgentRouter · Anthropic").assertIsDisplayed().performClick()
+        rule.onNodeWithTag("provider-url").assertTextContains("https://agentrouter.org")
+        rule.onNodeWithTag("provider-model").assertTextContains("claude-opus-5")
+        rule.onNodeWithText("URL здесь без /v1", substring = true).assertExists()
+        rule.onNodeWithText("Отмена").performClick()
+    }
+
     @Test fun draftSurvivesOpeningCatalogAndReturningToChat() {
         dismissStoragePrompt()
         rule.onNodeWithTag("chat-input").performTextInput("Мой черновик")

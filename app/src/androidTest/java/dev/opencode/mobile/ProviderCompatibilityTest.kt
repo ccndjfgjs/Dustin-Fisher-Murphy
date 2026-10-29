@@ -5,10 +5,12 @@ import dev.opencode.mobile.ai.AiClients
 import dev.opencode.mobile.ai.AiMessage
 import dev.opencode.mobile.ai.AiRequest
 import dev.opencode.mobile.ai.AiToolCall
+import dev.opencode.mobile.ai.AnthropicClient
 import dev.opencode.mobile.ai.OpenAiCompatibleClient
 import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.ChatSession
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.ProviderCatalog
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.ToolCallRef
 import dev.opencode.mobile.tools.Tools
@@ -102,6 +104,65 @@ class ProviderCompatibilityTest {
             val messages = body.getJSONArray("messages")
             assertEquals("call-1", messages.getJSONObject(1).getJSONArray("tool_calls").getJSONObject(0).getString("id"))
             assertEquals("call-1", messages.getJSONObject(2).getString("tool_call_id"))
+        }
+    }
+
+    @Test fun newOpenAiPresetsUseExpectedPathsAndStandardPayloads() {
+        val endpoints = mapOf(
+            "dahl" to "https://inference.dahl.global/v1/chat/completions",
+            "space-bunny" to "https://spacebunnymodel.com/api/v1/chat/completions",
+            "agentrouter-openai" to "https://agentrouter.org/v1/chat/completions"
+        )
+        endpoints.forEach { (id, endpoint) ->
+            val preset = ProviderCatalog.presets.single { it.id == id }
+            val provider = preset.createProvider()
+            assertEquals(endpoint, AiClients.endpoint(provider.baseUrl, "chat/completions"))
+            val payload = OpenAiCompatibleClient(provider).buildPayload(
+                request(preset.model, listOf(AiMessage(role = "user", content = "Привет"))).copy(tools = Tools.specs)
+            )
+            assertEquals(preset.model, payload.getString("model"))
+            assertEquals("auto", payload.getString("tool_choice"))
+            assertTrue(payload.getJSONArray("tools").length() > 0)
+            // Settings for direct DeepSeek/Alibaba endpoints must not leak into these gateways.
+            assertFalse(payload.has("thinking"))
+            assertFalse(payload.has("enable_thinking"))
+        }
+    }
+
+    @Test fun agentRouterAnthropicPresetUsesMessagesProtocolAndToolHistory() = runBlocking {
+        val preset = ProviderCatalog.presets.single { it.id == "agentrouter-anthropic" }
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setBody("""{"content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"test.txt"}}],"stop_reason":"tool_use"}"""))
+            server.enqueue(MockResponse().setBody("""{"content":[{"type":"text","text":"Готово"}],"stop_reason":"end_turn"}"""))
+            val local = preset.createProvider().copy(baseUrl = server.url("/").toString())
+            assertTrue(AiClients.create(local) is AnthropicClient)
+            // Only a dummy key is sent to loopback; production's URL policy forbids API keys over HTTP.
+            val ai = AnthropicClient(local.copy(apiKey = "test-only-key"))
+            val first = request(preset.model, listOf(AiMessage(role = "user", content = "Проверь")))
+                .copy(tools = Tools.specs, stream = false)
+            val response = ai.complete(first) { }
+            assertEquals("read_file", response.toolCalls.single().name)
+            val next = first.copy(messages = first.messages +
+                AiMessage(role = "assistant", toolCalls = response.toolCalls) +
+                AiMessage(role = "tool", toolCallId = "toolu_1", content = "файл прочитан"))
+            assertEquals("Готово", ai.complete(next) { }.content)
+            val firstRequest = server.takeRequest(5, TimeUnit.SECONDS)!!
+            val secondRequest = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertEquals("/v1/messages", firstRequest.path)
+            assertEquals("test-only-key", firstRequest.getHeader("x-api-key"))
+            assertEquals("2023-06-01", firstRequest.getHeader("anthropic-version"))
+            assertNull(firstRequest.getHeader("Authorization"))
+            val firstBody = JSONObject(firstRequest.body.readUtf8())
+            assertEquals("claude-opus-5", firstBody.getString("model"))
+            assertTrue(firstBody.getJSONArray("tools").length() > 0)
+            val messages = JSONObject(secondRequest.body.readUtf8()).getJSONArray("messages")
+            val toolUse = messages.getJSONObject(1).getJSONArray("content").getJSONObject(0)
+            val toolResult = messages.getJSONObject(2).getJSONArray("content").getJSONObject(0)
+            assertEquals("tool_use", toolUse.getString("type"))
+            assertEquals("toolu_1", toolUse.getString("id"))
+            assertEquals("tool_result", toolResult.getString("type"))
+            assertEquals("toolu_1", toolResult.getString("tool_use_id"))
         }
     }
 

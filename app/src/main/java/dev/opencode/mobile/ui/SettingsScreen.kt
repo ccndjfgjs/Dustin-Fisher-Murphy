@@ -79,7 +79,7 @@ fun SettingsScreen(vm: AppViewModel) {
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
     ) {
-        ScreenHeader(title = "Настройки", subtitle = "OpenCode Mobile 0.3.0")
+        ScreenHeader(title = "Настройки", subtitle = "OpenCode Mobile 0.3.1")
         ui.storageError?.let { error ->
             Text(error, color = Danger, fontSize = 12.sp, modifier = Modifier.padding(14.dp))
         }
@@ -171,7 +171,7 @@ fun SettingsScreen(vm: AppViewModel) {
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "Каталог содержит Alibaba Cloud, DeepSeek, Gemini и другие совместимые API. " +
+                "Каталог содержит Alibaba Cloud, Dahl, Space Bunny, AgentRouter и другие совместимые API. " +
                     "Ключи хранятся только на устройстве.",
                 fontSize = 12.sp,
                 color = Muted
