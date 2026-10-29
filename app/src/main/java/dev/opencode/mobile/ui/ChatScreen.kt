@@ -75,6 +75,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -195,10 +196,18 @@ fun ChatScreen(vm: AppViewModel) {
                     val last = info.visibleItemsInfo.lastOrNull()
                     val overflow = if (last != null) last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding) else 0
                     if (last == null || last.index < messages.lastIndex || overflow > 0) {
+                        // layoutInfo can be published while Compose is measuring. Wait for the next
+                        // frame before scrolling, then re-read the layout rather than using stale bounds.
+                        withFrameNanos { }
+                        val current = listState.layoutInfo
+                        if (current.totalItemsCount != messages.size) return@collect
+                        val currentLast = current.visibleItemsInfo.lastOrNull()
+                        val currentOverflow = if (currentLast != null)
+                            currentLast.offset + currentLast.size - (current.viewportEndOffset - current.afterContentPadding) else 0
                         autoScrolling = true
                         try {
-                            if (last == null || last.index < messages.lastIndex) listState.scrollToItem(messages.lastIndex)
-                            else listState.scrollBy(overflow.toFloat())
+                            if (currentLast == null || currentLast.index < messages.lastIndex) listState.scrollToItem(messages.lastIndex)
+                            else if (currentOverflow > 0) listState.scrollBy(currentOverflow.toFloat())
                         } finally {
                             autoScrolling = false
                         }
@@ -599,7 +608,11 @@ internal fun InlineApproval(call: ToolCallRef, summary: String, onDecision: (Boo
             .border(1.dp, Accent.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
             .padding(start = 12.dp, end = 8.dp, top = 8.dp).testTag("inline-approval")
     ) {
-        Text("Разрешить инструмент?", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text(when {
+            call.name == "git_commit" -> "Создать коммит из подготовленных изменений?"
+            call.name.startsWith("mcp_") -> "Разрешить вызов MCP-сервера?"
+            else -> "Разрешить инструмент?"
+        }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         Column(Modifier.heightIn(max = 110.dp).verticalScroll(rememberScrollState())) {
             SelectionContainer {
                 Column {
@@ -690,7 +703,9 @@ private fun toolTitle(name: String?): String = when (name) {
     "web_fetch" -> "Загрузка страницы"
     "todo_write" -> "План задачи"
     "device_info" -> "Информация об устройстве"
-    else -> name ?: "Инструмент"
+    "git_diff" -> "Git diff"
+    "git_commit" -> "Git коммит"
+    else -> if (name?.startsWith("mcp_") == true) "MCP-инструмент" else name ?: "Инструмент"
 }
 
 @Composable

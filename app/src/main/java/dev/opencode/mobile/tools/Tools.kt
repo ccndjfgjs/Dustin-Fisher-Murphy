@@ -47,6 +47,8 @@ data class ToolContext(
     val useRoot: Boolean,
     val sandboxed: Boolean,
     val planMode: Boolean = false,
+    val gitExecutable: String = "git",
+    val gitCommitApproved: Boolean = false,
     val onChunk: (String) -> Unit = {},
     val onTodo: (List<dev.opencode.mobile.data.TodoItem>) -> Unit = {}
 )
@@ -218,6 +220,16 @@ object Tools {
             name = "device_info",
             description = "Информация об устройстве: Android, ABI, root, SELinux, свободное место.",
             parameters = schema(emptyMap(), emptyList())
+        ),
+        ToolSpec(
+            name = "git_diff",
+            description = "Показать Git diff в корне выбранного проекта. staged=true показывает подготовленные изменения.",
+            parameters = schema(mapOf("staged" to bool("Показать индекс вместо рабочей копии")), emptyList())
+        ),
+        ToolSpec(
+            name = "git_commit",
+            description = "Создать коммит ТОЛЬКО из уже подготовленных изменений. Всегда требует отдельного подтверждения пользователя с diff. Файлы не добавляются автоматически; hooks и подпись отключены.",
+            parameters = schema(mapOf("message" to str("Сообщение коммита")), listOf("message"))
         )
     )
 
@@ -255,6 +267,7 @@ object Tools {
                 "todo_write" -> todoWrite(args, effective)
                 "web_fetch" -> webFetch(args)
                 "device_info" -> deviceInfo(effective)
+                "git_diff", "git_commit" -> GitTools.execute(name, args, effective)
                 else -> ToolOutcome(false, "Неизвестный инструмент: $name", "Ошибка")
             }
         } catch (cancelled: CancellationException) {

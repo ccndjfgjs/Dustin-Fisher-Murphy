@@ -111,6 +111,8 @@ data class AppSettings(
     val allowRoot: Boolean = false,
     val autoApproveTools: Boolean = false,
     val planMode: Boolean = false,
+    val gitExecutable: String = "git",
+    val mcpServers: List<McpServer> = emptyList(),
     val maxIterations: Int = 40,
     val systemAppend: String = "",
     val lastWorkspace: String = "/sdcard/OpenCode",
@@ -141,6 +143,8 @@ data class AppSettings(
             .put("allowRoot", allowRoot)
             .put("autoApproveTools", autoApproveTools)
             .put("planMode", planMode)
+            .put("gitExecutable", gitExecutable)
+            .put("mcpServers", JSONArray().apply { mcpServers.forEach { put(it.toJson()) } })
             .put("maxIterations", maxIterations)
             .put("systemAppend", systemAppend)
             .put("lastWorkspace", lastWorkspace)
@@ -164,6 +168,10 @@ data class AppSettings(
                 allowRoot = o.optBoolean("allowRoot", false),
                 autoApproveTools = o.optBoolean("autoApproveTools", false),
                 planMode = o.optBoolean("planMode", false),
+                gitExecutable = o.optString("gitExecutable", "git"),
+                mcpServers = o.optJSONArray("mcpServers")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { index -> arr.optJSONObject(index)?.let { McpServer.fromJson(it) } }
+                } ?: emptyList(),
                 maxIterations = o.optInt("maxIterations", 40),
                 systemAppend = o.optString("systemAppend", ""),
                 lastWorkspace = o.optString("lastWorkspace", "/sdcard/OpenCode"),

@@ -379,6 +379,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     streaming = settings.streaming,
                     reasoningLevel = settings.reasoningLevel,
                     planMode = settings.planMode,
+                    gitExecutable = settings.gitExecutable,
+                    mcpServers = settings.mcpServers,
                     listener = agentListener(runId, session.id)
                 )
             } catch (c: kotlinx.coroutines.CancellationException) {
@@ -546,6 +548,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             ui = ui.copy(toast = "Длинная история сжата для запроса; оригинал сохранён")
         }
 
+        override fun onMcpWarning(text: String) = dispatchAgentEvent(runId, sessionId) {
+            ui = ui.copy(toast = text)
+        }
+
         override fun onTodo(items: List<TodoItem>) = dispatchAgentEvent(runId, sessionId) {
             ui = ui.copy(todos = items)
         }
@@ -706,7 +712,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (argsJson.isNullOrBlank()) return ""
         return runCatching {
             val o = JSONObject(argsJson)
-            val interesting = listOf("path", "command", "url", "pattern", "from", "to", "cwd")
+            if (name == "git_commit" && o.has("_staged_preview")) {
+                return@runCatching "Сообщение: ${o.optString("message")}\nТолько индекс; без hooks и подписи.\n${o.optString("_staged_preview")}"
+            }
+            if (name.startsWith("mcp_") && o.has("_mcp_tool")) {
+                return@runCatching "Сервер: ${o.optString("_mcp_server")}\nИнструмент: ${o.optString("_mcp_tool")}\nАргументы:\n${o.optJSONObject("_mcp_args")?.toString(2) ?: "{}"}"
+            }
+            val interesting = listOf("path", "command", "url", "pattern", "from", "to", "cwd", "message", "staged")
             interesting.mapNotNull { key -> if (o.has(key)) "$key=${o.optString(key)}" else null }
                 .joinToString("  ")
                 .ifBlank { argsJson.take(120) }
