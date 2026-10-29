@@ -145,6 +145,10 @@ jobs:
           matches = [line for line in lines if re.search(r'(^e: |^error:|^FAILURE:|^\* What went wrong|^> Task .*FAILED|^Caused by:|Execution failed for task|FAILED|Exception)', line)]
           for line in matches[-30:]:
               print('::error::' + line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')[:1200])
+          for index, line in enumerate(lines):
+              if re.search(r' > .+\[emulator-.+\].*FAILED', line):
+                  detail = '\n'.join(lines[index:index + 18])[:3000]
+                  print('::error::' + detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
           PY
           else
             echo '::error::The emulator did not start. See the emulator action log.'
@@ -152,6 +156,7 @@ jobs:
           # Surface assertion messages and stack traces even when artifact/log downloads are unavailable.
           python3 - <<'PY'
           from pathlib import Path
+          from html.parser import HTMLParser
           import xml.etree.ElementTree as ET
           for file in Path('app/build/outputs/androidTest-results').rglob('*.xml'):
               try:
@@ -162,6 +167,27 @@ jobs:
                   for failure in case.findall('failure') + case.findall('error'):
                       detail = f"{case.get('classname')}.{case.get('name')}: {failure.get('message', '')}\n{failure.text or ''}"
                       escaped = detail[:3000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print('::error::' + escaped)
+          class PreBlocks(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.in_pre, self.blocks, self.current = False, [], []
+              def handle_starttag(self, tag, attrs):
+                  if tag == 'pre':
+                      self.in_pre, self.current = True, []
+              def handle_endtag(self, tag):
+                  if tag == 'pre' and self.in_pre:
+                      self.blocks.append(''.join(self.current))
+                      self.in_pre = False
+              def handle_data(self, data):
+                  if self.in_pre:
+                      self.current.append(data)
+          for file in Path('app/build/reports/androidTests').rglob('*.html'):
+              parser = PreBlocks()
+              parser.feed(file.read_text(encoding='utf-8', errors='replace'))
+              for block in parser.blocks:
+                  if 'AssertionError' in block or 'Exception' in block:
+                      escaped = (str(file) + ':\n' + block)[:3500].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
                       print('::error::' + escaped)
           PY
       - name: Upload emulator results

@@ -34,11 +34,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
@@ -286,9 +288,9 @@ private fun ChatHeader(title: String, workspace: String, onWorkspace: () -> Unit
 @Composable
 private fun EmptyChat(showSuggestions: Boolean, onPrompt: (String) -> Unit) {
     val suggestions = listOf(
-        "Изучить проект" to "Изучи структуру проекта и кратко расскажи, как он устроен.",
-        "Найти ошибку" to "Помоги найти и исправить ошибку в проекте.",
-        "Добавить функцию" to "Помоги добавить новую функцию в проект."
+        Triple("Изучить проект", "Изучи структуру проекта и кратко расскажи, как он устроен.", Icons.Outlined.FolderOpen),
+        Triple("Найти ошибку", "Помоги найти и исправить ошибку в проекте.", Icons.Outlined.BugReport),
+        Triple("Добавить функцию", "Помоги добавить новую функцию в проект.", Icons.Outlined.Code)
     )
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp),
@@ -314,17 +316,17 @@ private fun EmptyChat(showSuggestions: Boolean, onPrompt: (String) -> Unit) {
             modifier = Modifier.widthIn(max = 320.dp)
         )
         if (showSuggestions) Spacer(Modifier.height(24.dp))
-        if (showSuggestions) suggestions.forEach { (label, prompt) ->
+        if (showSuggestions) suggestions.forEach { (label, prompt, icon) ->
             Row(
                 modifier = Modifier.fillMaxWidth().widthIn(max = 360.dp).padding(vertical = 3.dp)
                     .clip(RoundedCornerShape(13.dp)).border(1.dp, ChatOutline, RoundedCornerShape(13.dp))
                     .clickable { onPrompt(prompt) }.padding(horizontal = 14.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Outlined.Code, null, tint = Accent, modifier = Modifier.size(17.dp))
+                Icon(icon, null, tint = Accent, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(10.dp))
                 Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Icon(Icons.Default.ArrowUpward, null, tint = Muted, modifier = Modifier.size(15.dp))
+                Icon(Icons.Default.ArrowForward, null, tint = Muted, modifier = Modifier.size(15.dp))
             }
         }
     }
@@ -480,6 +482,8 @@ private fun toolTitle(name: String?): String = when (name) {
     "read_file" -> "Чтение файла"
     "write_file" -> "Запись файла"
     "edit_file" -> "Изменение файла"
+    "delete_path" -> "Удаление файла или папки"
+    "move_path" -> "Перемещение файла или папки"
     "run_command" -> "Команда в терминале"
     "grep", "glob" -> "Поиск в проекте"
     "web_fetch" -> "Загрузка страницы"
