@@ -42,7 +42,8 @@ class SessionStore(context: Context) {
             summary.title.contains(needle, ignoreCase = true) || summary.cwd.contains(needle, ignoreCase = true) ||
                 load(summary.id)?.messages?.any { message ->
                     message.content.contains(needle, ignoreCase = true) ||
-                        message.reasoning.contains(needle, ignoreCase = true)
+                        message.reasoning.contains(needle, ignoreCase = true) ||
+                        message.attachments.any { it.path.contains(needle, true) || it.content.contains(needle, true) }
                 } == true
         }
     }

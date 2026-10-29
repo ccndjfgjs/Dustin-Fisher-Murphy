@@ -17,6 +17,12 @@ object ChatExport {
             }
             if (message.toolArgs != null) append("Аргументы: ").append(message.toolArgs).append("\n\n")
             if (message.content.isNotBlank()) append(message.content).append("\n\n")
+            message.attachments.forEach { attachment ->
+                val longest = Regex("`+").findAll(attachment.content).map { it.value.length }.maxOrNull() ?: 0
+                val fence = "`".repeat(maxOf(3, longest + 1))
+                append("### Файл: ").append(attachment.path.replace('\n', ' ')).append("\n\n")
+                append(fence).append('\n').append(attachment.content).append('\n').append(fence).append("\n\n")
+            }
             if (message.toolCalls.isNotEmpty()) {
                 message.toolCalls.forEach { call ->
                     append("Вызов инструмента: ").append(call.name).append("\n\n")

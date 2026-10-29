@@ -13,7 +13,13 @@ internal object HistoryAdapter {
         while (index < history.size) {
             val message = history[index]
             when (message.role) {
-                Role.USER -> out.add(AiMessage(role = "user", content = message.content))
+                Role.USER -> out.add(AiMessage(role = "user", content = buildString {
+                    append(message.content)
+                    message.attachments.forEach { attachment ->
+                        append("\n\n[Снимок прикреплённого файла: ").append(attachment.path).append("]\n")
+                        append(attachment.content).append("\n[Конец файла]\n")
+                    }
+                }))
                 Role.ASSISTANT -> {
                     if (message.errorStatus != null || (message.toolCalls.isEmpty() && message.content.isBlank())) {
                         index++

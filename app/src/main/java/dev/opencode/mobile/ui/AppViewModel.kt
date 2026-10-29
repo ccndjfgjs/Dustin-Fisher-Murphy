@@ -11,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.opencode.mobile.OpenCodeApp
 import dev.opencode.mobile.agent.AgentEngine
+import dev.opencode.mobile.agent.ProjectContext
 import dev.opencode.mobile.data.AppSettings
 import dev.opencode.mobile.data.ChatExport
 import dev.opencode.mobile.data.ChatMessage
@@ -328,15 +329,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun sendMessage(raw: String) {
         val text = raw.trim()
         if (text.isEmpty() || ui.busy) return
-        var session = ui.session ?: ChatSession(cwd = ui.workspace)
-        if (!session.titleManuallySet && session.messages.none { it.role == Role.USER }) {
-            session = session.copy(title = text.take(48).replace('\n', ' '))
-        }
-        val userMsg = ChatMessage(role = Role.USER, content = text)
-        session = session.copy(messages = session.messages + userMsg, updatedAt = System.currentTimeMillis())
-        setSession(session)
-        application.prefs.update { it.copy(lastSessionId = session.id) }
-
+        val cwd = ui.session?.cwd ?: ui.workspace
         val settings = application.prefs.settings.value
         val provider = settings.activeProvider
         val model = provider.model
@@ -346,13 +339,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             busy = true,
             runningRootAllowed = settings.allowRoot,
             runningAutoApprove = settings.autoApproveTools,
-            status = "Думаю…",
+            status = "Проверяю файлы…",
             screen = Screen.CHAT
         )
         val runId = ++agentRunId
 
         job = viewModelScope.launch {
             try {
+                val attachments = try {
+                    withContext(Dispatchers.IO) { ProjectContext.attachments(cwd, text) }
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (e: Exception) {
+                    ui = ui.copy(toast = e.message ?: "Не удалось прикрепить файл")
+                    return@launch
+                }
+                var session = ui.session ?: ChatSession(cwd = cwd)
+                if (!session.titleManuallySet && session.messages.none { it.role == Role.USER }) {
+                    session = session.copy(title = text.take(48).replace('\n', ' '))
+                }
+                val userMsg = ChatMessage(role = Role.USER, content = text, attachments = attachments)
+                session = session.copy(messages = session.messages + userMsg, updatedAt = System.currentTimeMillis())
+                setSession(session)
+                application.prefs.update { it.copy(lastSessionId = session.id) }
+                // Do not erase a draft the user changed while file snapshots were being read.
+                if (ui.chatDraft == raw) updateChatDraft("")
                 engine.run(
                     provider = provider,
                     model = model,

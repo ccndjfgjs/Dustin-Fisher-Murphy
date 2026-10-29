@@ -53,10 +53,18 @@ data class AnthropicTrace(
     }
 }
 
+data class ChatAttachment(val path: String, val content: String) {
+    fun toJson(): JSONObject = JSONObject().put("path", path).put("content", content)
+    companion object {
+        fun fromJson(o: JSONObject) = ChatAttachment(o.optString("path"), o.optString("content"))
+    }
+}
+
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val role: Role,
     val content: String = "",
+    val attachments: List<ChatAttachment> = emptyList(),
     val reasoning: String = "",
     val reasoningDurationMs: Long? = null,
     val anthropicTrace: AnthropicTrace? = null,
@@ -76,6 +84,7 @@ data class ChatMessage(
         o.put("id", id)
         o.put("role", role.name)
         o.put("content", content)
+        if (attachments.isNotEmpty()) o.put("attachments", JSONArray().apply { attachments.forEach { put(it.toJson()) } })
         if (reasoning.isNotEmpty()) o.put("reasoning", reasoning)
         reasoningDurationMs?.let { o.put("reasoningDurationMs", it) }
         anthropicTrace?.let { o.put("anthropicTrace", it.toJson()) }
@@ -104,6 +113,9 @@ data class ChatMessage(
                 id = o.optString("id", UUID.randomUUID().toString()),
                 role = runCatching { Role.valueOf(o.optString("role", "USER")) }.getOrDefault(Role.USER),
                 content = o.optString("content", ""),
+                attachments = o.optJSONArray("attachments")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { index -> arr.optJSONObject(index)?.let { ChatAttachment.fromJson(it) } }
+                } ?: emptyList(),
                 reasoning = o.optString("reasoning", ""),
                 reasoningDurationMs = if (!o.isNull("reasoningDurationMs")) o.optLong("reasoningDurationMs") else null,
                 anthropicTrace = o.optJSONObject("anthropicTrace")?.let { AnthropicTrace.fromJson(it) },

@@ -96,6 +96,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.opencode.mobile.agent.ProjectContext
 import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.ModelReasoningCatalog
 import dev.opencode.mobile.data.Provider
@@ -104,8 +105,11 @@ import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
 import dev.opencode.mobile.data.TodoItem
 import dev.opencode.mobile.data.ToolCallRef
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
@@ -121,6 +125,7 @@ fun ChatScreen(vm: AppViewModel) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var showSessions by remember { mutableStateOf(false) }
+    var showFiles by remember { mutableStateOf(false) }
     var exportId by rememberSaveable { mutableStateOf<String?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
         val id = exportId
@@ -277,11 +282,11 @@ fun ChatScreen(vm: AppViewModel) {
             reasoningLevel = ui.settings.reasoningLevel,
             onReasoningLevelChange = { level -> vm.saveSettings { it.copy(reasoningLevel = level) } },
             onModelClick = { focusManager.clearFocus(); showModels = true },
+            onAttach = { focusManager.clearFocus(); showFiles = true },
             onSend = {
                 if (ui.chatDraft.isNotBlank() && !ui.busy) {
                     followLatest = true
                     vm.sendMessage(ui.chatDraft)
-                    vm.updateChatDraft("")
                 }
             },
             onStop = vm::stop
@@ -300,6 +305,18 @@ fun ChatScreen(vm: AppViewModel) {
             onAddProvider = {
                 showModels = false
                 vm.openProviderCatalog()
+            }
+        )
+    }
+    if (showFiles) {
+        FileMentionSheet(
+            cwd = session?.cwd ?: ui.workspace,
+            onDismiss = { showFiles = false },
+            onPick = { path ->
+                val current = vm.ui.chatDraft
+                val separator = if (current.isEmpty() || current.last().isWhitespace()) "" else " "
+                vm.updateChatDraft(current + separator + "@" + JSONObject.quote(path) + " ")
+                showFiles = false
             }
         )
     }
@@ -454,6 +471,10 @@ private fun MessageItem(message: ChatMessage, vm: AppViewModel, onExpandTool: ()
                 Spacer(Modifier.height(4.dp))
                 SelectionContainer {
                     Text(message.content, fontSize = 14.sp, lineHeight = 21.sp, color = DesignTokens.textHigh)
+                }
+                if (message.attachments.isNotEmpty()) {
+                    Text("Прикреплено: " + message.attachments.joinToString { it.path },
+                        color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
                 }
             }
         }
@@ -659,7 +680,8 @@ internal fun ChatComposer(
     onSend: () -> Unit,
     onStop: () -> Unit,
     reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
-    onReasoningLevelChange: (ReasoningLevel) -> Unit = {}
+    onReasoningLevelChange: (ReasoningLevel) -> Unit = {},
+    onAttach: () -> Unit = {}
 ) {
     Column(Modifier.fillMaxWidth().imePadding().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
         Column(
@@ -705,7 +727,7 @@ internal fun ChatComposer(
             }
             Spacer(Modifier.height(8.dp))
             BoxWithConstraints(Modifier.fillMaxWidth().testTag("chat-composer-actions")) {
-                val maxChipWidth = (maxWidth - 48.dp).coerceAtLeast(0.dp)
+                val maxChipWidth = (maxWidth - 92.dp).coerceAtLeast(0.dp)
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -725,7 +747,11 @@ internal fun ChatComposer(
                         }
                         Icon(Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(18.dp))
                     }
-                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = onAttach, enabled = !busy,
+                        modifier = Modifier.size(40.dp).semantics { contentDescription = "Прикрепить файл" }) {
+                        Text("@", color = if (busy) Muted else Accent, fontSize = 20.sp)
+                    }
+                    Spacer(Modifier.width(4.dp))
                     val enabled = busy || value.isNotBlank()
                     Box(
                         modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp))
@@ -742,6 +768,33 @@ internal fun ChatComposer(
                             modifier = Modifier.size(20.dp)
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun FileMentionSheet(cwd: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    var paths by remember(cwd) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(cwd, query) {
+        delay(150)
+        paths = withContext(Dispatchers.IO) { runCatching { ProjectContext.findFiles(cwd, query) }.getOrDefault(emptyList()) }
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = DesignTokens.chatPanel) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
+            Text("Упомянуть файл", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Text("Текст выбранных файлов и AGENTS.md из корня проекта отправляются провайдеру. До 5 файлов, по 64 КБ.",
+                color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+            OutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true,
+                label = { Text("Поиск файла в проекте") }, modifier = Modifier.fillMaxWidth().testTag("mention-search"))
+            if (paths.isEmpty()) Text("Файлы не найдены", color = Muted, modifier = Modifier.padding(vertical = 24.dp))
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp), contentPadding = PaddingValues(bottom = 18.dp)) {
+                items(paths, key = { it }) { path ->
+                    Text(path, modifier = Modifier.fillMaxWidth().clickable { onPick(path) }.padding(vertical = 12.dp),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 13.sp)
                 }
             }
         }
