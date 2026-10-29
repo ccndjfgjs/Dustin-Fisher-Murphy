@@ -88,6 +88,7 @@ import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
 import dev.opencode.mobile.data.TodoItem
+import kotlinx.coroutines.flow.collect
 import java.io.File
 
 private val ChatPanel = Color(0xFF1A1E28)
