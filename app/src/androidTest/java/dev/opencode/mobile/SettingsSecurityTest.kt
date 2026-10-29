@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.opencode.mobile.data.AppSettings
 import dev.opencode.mobile.data.Prefs
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.ProviderCatalog
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -56,6 +57,21 @@ class SettingsSecurityTest {
         assertFalse(sp.contains("settings_v1"))
         assertFalse(sp.all.toString().contains(secret))
         assertEquals(secret, Prefs(context, name, alias).settings.value.activeProvider.apiKey)
+    }
+
+    @Test fun addingPresetKeepsExistingProviderAndEncryptedKey() {
+        val sp = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+        sp.edit().putString("settings_v1", settings().toJson().toString()).commit()
+        val prefs = Prefs(context, name, alias)
+        assertEquals(1, prefs.settings.value.providers.size) // Catalog does not mutate saved settings.
+        val preset = ProviderCatalog.presets.first { it.id == "alibaba-coding-intl" }.createProvider()
+            .copy(apiKey = "coding-plan-test-key")
+        prefs.update { it.copy(providers = it.providers + preset, activeProviderId = preset.id) }
+        val restored = Prefs(context, name, alias).settings.value
+        assertEquals(settings().providers.single(), restored.providers.first())
+        assertEquals("coding-plan-test-key", restored.activeProvider.apiKey)
+        assertFalse(sp.all.toString().contains(secret))
+        assertFalse(sp.all.toString().contains("coding-plan-test-key"))
     }
 
     @Test fun corruptedCiphertextIsNotOverwritten() {

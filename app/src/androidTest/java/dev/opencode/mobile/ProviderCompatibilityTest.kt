@@ -1,6 +1,7 @@
 package dev.opencode.mobile
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import dev.opencode.mobile.ai.AiClients
 import dev.opencode.mobile.ai.AiMessage
 import dev.opencode.mobile.ai.AiRequest
 import dev.opencode.mobile.ai.AiToolCall
@@ -10,7 +11,10 @@ import dev.opencode.mobile.data.ChatSession
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.ToolCallRef
+import dev.opencode.mobile.tools.Tools
 import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import okio.Buffer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -19,6 +23,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
 class ProviderCompatibilityTest {
@@ -65,6 +70,39 @@ class ProviderCompatibilityTest {
             .parseStream(Buffer().writeUtf8(stream)) { }
         assertEquals(listOf("a", "b"), response.toolCalls.map { it.id })
         assertEquals("sig-a", response.toolCalls.first().googleThoughtSignature)
+    }
+
+    @Test fun compatibleClientSendsToolHistoryOverHttpToLocalServer() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val stream = """
+                data: {"choices":[{"delta":{"content":null,"tool_calls":[{"index":0,"id":"call-1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}
+                data: [DONE]
+            """.trimIndent() + "\n"
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(stream))
+            server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("""{"choices":[{"message":{"content":"Готово"}}]}"""))
+            val url = server.url("/v1").toString()
+            val ai = AiClients.create(Provider(name = "local", baseUrl = url, model = "local-model"))
+            val first = request("local-model", listOf(AiMessage(role = "user", content = "Проверь"))).copy(tools = Tools.specs)
+            val response = ai.complete(first) { }
+            assertEquals("read_file", response.toolCalls.single().name)
+            val next = first.copy(
+                stream = false,
+                messages = first.messages + AiMessage(role = "assistant", toolCalls = response.toolCalls) +
+                    AiMessage(role = "tool", toolCallId = "call-1", content = "файл прочитан")
+            )
+            assertEquals("Готово", ai.complete(next) { }.content)
+            val firstRequest = server.takeRequest(5, TimeUnit.SECONDS)!!
+            val secondRequest = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertEquals("POST", firstRequest.method)
+            assertEquals("/v1/chat/completions", firstRequest.path)
+            assertTrue(JSONObject(firstRequest.body.readUtf8()).getJSONArray("tools").length() > 0)
+            val body = JSONObject(secondRequest.body.readUtf8())
+            assertFalse(body.getBoolean("stream"))
+            val messages = body.getJSONArray("messages")
+            assertEquals("call-1", messages.getJSONObject(1).getJSONArray("tool_calls").getJSONObject(0).getString("id"))
+            assertEquals("call-1", messages.getJSONObject(2).getString("tool_call_id"))
+        }
     }
 
     @Test fun signatureSurvivesSessionAndIsOnlySentToGoogle() {
