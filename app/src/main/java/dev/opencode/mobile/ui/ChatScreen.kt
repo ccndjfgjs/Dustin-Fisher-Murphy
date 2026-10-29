@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -76,6 +77,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -567,37 +569,44 @@ internal fun ChatComposer(
                 }
             )
             Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            BoxWithConstraints(Modifier.fillMaxWidth().testTag("chat-composer-actions")) {
+                val maxChipWidth = (maxWidth - 48.dp).coerceAtLeast(0.dp)
                 Row(
-                    modifier = Modifier.weight(1f, fill = false).heightIn(min = 42.dp)
-                        .clip(RoundedCornerShape(12.dp)).background(SurfaceHigh)
-                        .clickable(onClick = onModelClick)
-                        .semantics { contentDescription = "Выбрать модель" }
-                        .testTag("chat-model-picker").padding(start = 11.dp, end = 7.dp, top = 5.dp, bottom = 5.dp),
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f, fill = false)) {
-                        Text(provider.model.ifBlank { "Выберите модель" }, color = Color(0xFFE5EBFF), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (busy) "${provider.name} · следующий запрос" else provider.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(
+                        modifier = Modifier.widthIn(max = maxChipWidth).heightIn(min = 40.dp)
+                            .clip(RoundedCornerShape(12.dp)).background(SurfaceHigh)
+                            .clickable(onClick = onModelClick)
+                            .semantics { contentDescription = "Выбрать модель" }
+                            .testTag("chat-model-picker").padding(start = 11.dp, end = 7.dp, top = 5.dp, bottom = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f, fill = false)) {
+                            Text(provider.model.ifBlank { "Выберите модель" }, color = Color(0xFFE5EBFF), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (busy) "${provider.name} · следующий запрос" else provider.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Icon(Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(18.dp))
                     }
-                    Icon(Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(18.dp))
-                }
-                Spacer(Modifier.weight(1f))
-                val enabled = busy || value.isNotBlank()
-                IconButton(
-                    onClick = { if (busy) onStop() else onSend() },
-                    enabled = enabled,
-                    modifier = Modifier.size(46.dp).background(
-                        if (busy) Danger.copy(alpha = 0.2f) else if (enabled) Accent else Color(0xFF303745),
-                        RoundedCornerShape(15.dp)
-                    )
-                ) {
-                    Icon(
-                        if (busy) Icons.Default.Stop else Icons.Default.ArrowUpward,
-                        if (busy) "Остановить ответ" else "Отправить сообщение",
-                        tint = if (busy) Danger else if (enabled) Color(0xFF101629) else Muted,
-                        modifier = Modifier.size(21.dp)
-                    )
+                    Spacer(Modifier.width(8.dp))
+                    val enabled = busy || value.isNotBlank()
+                    Box(
+                        modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp))
+                            .background(if (busy) Danger.copy(alpha = 0.2f) else if (enabled) Accent else Color(0xFF303745))
+                            .clickable(enabled = enabled, role = SemanticsRole.Button) { if (busy) onStop() else onSend() }
+                            .semantics { contentDescription = if (busy) "Остановить ответ" else "Отправить сообщение" }
+                            .testTag("chat-send"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            if (busy) Icons.Default.Stop else Icons.Default.ArrowUpward,
+                            contentDescription = null,
+                            tint = if (busy) Danger else if (enabled) Color(0xFF101629) else Muted,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
         }
