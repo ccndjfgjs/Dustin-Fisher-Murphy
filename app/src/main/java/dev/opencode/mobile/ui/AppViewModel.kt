@@ -375,6 +375,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     systemAppend = settings.systemAppend,
                     streaming = settings.streaming,
                     reasoningLevel = settings.reasoningLevel,
+                    planMode = settings.planMode,
                     listener = agentListener(runId, session.id)
                 )
             } catch (c: kotlinx.coroutines.CancellationException) {

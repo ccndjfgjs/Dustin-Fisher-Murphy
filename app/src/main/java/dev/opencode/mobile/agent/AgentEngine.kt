@@ -55,6 +55,7 @@ class AgentEngine {
         systemAppend: String,
         streaming: Boolean,
         reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
+        planMode: Boolean = false,
         listener: Listener
     ) {
         var pendingReasoning = StringBuilder()
@@ -66,10 +67,11 @@ class AgentEngine {
         try {
             val ai = AiClients.create(provider)
             client = ai
-            val useRoot = canUseRoot && withContext(Dispatchers.IO) { Shell.rootAvailable() }
+            val useRoot = !planMode && canUseRoot && withContext(Dispatchers.IO) { Shell.rootAvailable() }
             val restrictedTools = ModelReasoningCatalog.toolsRestricted(provider, model, reasoningLevel)
             val system = withContext(Dispatchers.IO) { buildSystemPrompt(cwd, useRoot, systemAppend) } +
-                if (restrictedTools) "\nИнструменты в этом запросе отключены. Не утверждай, что ты их вызвал." else ""
+                (if (restrictedTools) "\nИнструменты в этом запросе отключены. Не утверждай, что ты их вызвал." else "") +
+                (if (planMode) "\nРежим плана: только изучай проект и предлагай план. Нельзя изменять файлы, запускать команды или обращаться к внешним инструментам. Для выполнения пользователь должен переключиться в режим агента." else "")
             val messages = mutableListOf<AiMessage>()
             val adapted = HistoryAdapter.toAiMessages(trimHistory(history))
             messages.addAll(if (restrictedTools) adapted.filter { it.role != "tool" }
@@ -86,7 +88,11 @@ class AgentEngine {
                     model = model,
                     system = system,
                     messages = messages,
-                    tools = if (restrictedTools) emptyList() else Tools.specs,
+                    tools = when {
+                        restrictedTools -> emptyList()
+                        planMode -> Tools.specs.filter { it.name in Tools.planAllowed }
+                        else -> Tools.specs
+                    },
                     temperature = 0.2,
                     maxTokens = 8192,
                     stream = streaming,
@@ -139,14 +145,18 @@ class AgentEngine {
                     listener.onToolStart(callRef)
                     listener.onStatus("Инструмент: ${call.name}")
 
-                    val allowed = if (!autoApprove && call.name !in Tools.readOnly) {
-                        listener.approve(callRef)
-                    } else {
-                        true
+                    val blockedByPlan = planMode && call.name !in Tools.planAllowed
+                    val allowed = when {
+                        blockedByPlan -> false
+                        planMode -> true
+                        !autoApprove && call.name !in Tools.readOnly -> listener.approve(callRef)
+                        else -> true
                     }
 
                     if (!allowed) {
-                        val denied = ToolOutcome(false, "Пользователь отклонил выполнение инструмента ${call.name}.", "Отклонено")
+                        val reason = if (blockedByPlan) "Режим плана: инструмент ${call.name} заблокирован. Для изменений пользователь должен переключиться в режим агента."
+                            else "Пользователь отклонил выполнение инструмента ${call.name}."
+                        val denied = ToolOutcome(false, reason, "Отклонено")
                         listener.onToolEnd(callRef, false, denied.output)
                         messages.add(
                             AiMessage(
@@ -163,6 +173,7 @@ class AgentEngine {
                         cwd = cwd,
                         useRoot = useRoot,
                         sandboxed = !useRoot,
+                        planMode = planMode,
                         onChunk = { chunk -> listener.onCommandOutputChunk(chunk) },
                         onTodo = { items -> listener.onTodo(items) }
                     )

@@ -282,6 +282,8 @@ fun ChatScreen(vm: AppViewModel) {
             busy = ui.busy,
             reasoningLevel = ui.settings.reasoningLevel,
             onReasoningLevelChange = { level -> vm.saveSettings { it.copy(reasoningLevel = level) } },
+            planMode = ui.settings.planMode,
+            onPlanModeChange = { plan -> vm.saveSettings { it.copy(planMode = plan) } },
             onModelClick = { focusManager.clearFocus(); showModels = true },
             onAttach = { focusManager.clearFocus(); showFiles = true },
             onSend = {
@@ -694,7 +696,9 @@ internal fun ChatComposer(
     onStop: () -> Unit,
     reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
     onReasoningLevelChange: (ReasoningLevel) -> Unit = {},
-    onAttach: () -> Unit = {}
+    onAttach: () -> Unit = {},
+    planMode: Boolean = false,
+    onPlanModeChange: (Boolean) -> Unit = {}
 ) {
     Column(Modifier.fillMaxWidth().imePadding().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
         Column(
@@ -716,6 +720,19 @@ internal fun ChatComposer(
                     }
                 }
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                var modeMenu by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { modeMenu = true }, enabled = !busy, modifier = Modifier.testTag("chat-mode")) {
+                        Text(if (planMode) "Режим: План" else "Режим: Агент", fontSize = 11.sp)
+                    }
+                    DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
+                        DropdownMenuItem(text = { Text("План · только чтение") }, onClick = { onPlanModeChange(true); modeMenu = false })
+                        DropdownMenuItem(text = { Text("Агент · разрешены действия") }, onClick = { onPlanModeChange(false); modeMenu = false })
+                    }
+                }
+                if (planMode) Text("Без изменений и команд", color = Muted, fontSize = 10.sp, maxLines = 1)
+            }
             val capability = ModelReasoningCatalog.capability(provider)
             if (capability != null) {
                 var menuOpen by remember { mutableStateOf(false) }

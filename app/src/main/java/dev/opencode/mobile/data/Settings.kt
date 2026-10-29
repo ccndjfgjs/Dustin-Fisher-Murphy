@@ -110,6 +110,7 @@ data class AppSettings(
     val activeProviderId: String = providers.first().id,
     val allowRoot: Boolean = false,
     val autoApproveTools: Boolean = false,
+    val planMode: Boolean = false,
     val maxIterations: Int = 40,
     val systemAppend: String = "",
     val lastWorkspace: String = "/sdcard/OpenCode",
@@ -139,6 +140,7 @@ data class AppSettings(
             .put("activeProviderId", activeProviderId)
             .put("allowRoot", allowRoot)
             .put("autoApproveTools", autoApproveTools)
+            .put("planMode", planMode)
             .put("maxIterations", maxIterations)
             .put("systemAppend", systemAppend)
             .put("lastWorkspace", lastWorkspace)
@@ -161,6 +163,7 @@ data class AppSettings(
                 activeProviderId = o.optString("activeProviderId", providers.first().id),
                 allowRoot = o.optBoolean("allowRoot", false),
                 autoApproveTools = o.optBoolean("autoApproveTools", false),
+                planMode = o.optBoolean("planMode", false),
                 maxIterations = o.optInt("maxIterations", 40),
                 systemAppend = o.optString("systemAppend", ""),
                 lastWorkspace = o.optString("lastWorkspace", "/sdcard/OpenCode"),

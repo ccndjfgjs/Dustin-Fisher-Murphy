@@ -45,6 +45,7 @@ data class ToolContext(
     val cwd: String,
     val useRoot: Boolean,
     val sandboxed: Boolean,
+    val planMode: Boolean = false,
     val onChunk: (String) -> Unit = {},
     val onTodo: (List<dev.opencode.mobile.data.TodoItem>) -> Unit = {}
 )
@@ -221,6 +222,8 @@ object Tools {
 
     // Network requests can transmit URL parameters, so web_fetch requires approval.
     val readOnly: Set<String> = setOf("read_file", "list_dir", "glob", "grep", "device_info")
+    // Plan mode is an explicit allowlist, including only the in-memory todo list in addition to reads.
+    val planAllowed: Set<String> = readOnly + "todo_write"
 
     fun resolve(cwd: String, path: String): File {
         val p = File(path)
@@ -228,20 +231,25 @@ object Tools {
     }
 
     suspend fun execute(name: String, args: JSONObject, ctx: ToolContext): ToolOutcome = withContext(Dispatchers.IO) {
+        if (ctx.planMode && name !in planAllowed) {
+            return@withContext ToolOutcome(false, "Режим плана: инструмент $name заблокирован. Для изменений переключитесь в режим агента.", "Заблокировано")
+        }
+        // Even a caller accidentally supplying root cannot elevate a plan-mode read.
+        val effective = if (ctx.planMode) ctx.copy(useRoot = false, sandboxed = true) else ctx
         try {
             when (name) {
-                "read_file" -> readFile(args, ctx)
-                "write_file" -> writeFile(args, ctx)
-                "edit_file" -> editFile(args, ctx)
-                "list_dir" -> listDir(args, ctx)
-                "glob" -> glob(args, ctx)
-                "grep" -> grep(args, ctx)
-                "run_command" -> runCommand(args, ctx)
-                "delete_path" -> deletePath(args, ctx)
-                "move_path" -> movePath(args, ctx)
-                "todo_write" -> todoWrite(args, ctx)
+                "read_file" -> readFile(args, effective)
+                "write_file" -> writeFile(args, effective)
+                "edit_file" -> editFile(args, effective)
+                "list_dir" -> listDir(args, effective)
+                "glob" -> glob(args, effective)
+                "grep" -> grep(args, effective)
+                "run_command" -> runCommand(args, effective)
+                "delete_path" -> deletePath(args, effective)
+                "move_path" -> movePath(args, effective)
+                "todo_write" -> todoWrite(args, effective)
                 "web_fetch" -> webFetch(args)
-                "device_info" -> deviceInfo(ctx)
+                "device_info" -> deviceInfo(effective)
                 else -> ToolOutcome(false, "Неизвестный инструмент: $name", "Ошибка")
             }
         } catch (cancelled: CancellationException) {
@@ -558,7 +566,7 @@ object Tools {
         .trim()
 
     private fun deviceInfo(ctx: ToolContext): ToolOutcome {
-        val root = Shell.rootStatus()
+        val root = if (ctx.planMode) dev.opencode.mobile.shell.RootStatus(false) else Shell.rootStatus()
         val rt = Runtime.getRuntime()
         val stat = android.os.StatFs(ctx.cwd.takeIf { File(it).exists() } ?: "/sdcard")
         val freeGb = stat.availableBytes / 1024.0 / 1024.0 / 1024.0
