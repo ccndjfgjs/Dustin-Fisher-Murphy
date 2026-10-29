@@ -1,16 +1,23 @@
 package dev.opencode.mobile.ui
 
 import androidx.compose.foundation.background
+import android.widget.Toast
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -98,22 +107,33 @@ fun MarkdownText(text: String, modifier: Modifier = Modifier) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { part ->
             if (part.isCode) {
+                val clipboard = LocalClipboardManager.current
+                val context = LocalContext.current
                 Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF0B0D12))
-                        .padding(10.dp)
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF10131B))
                 ) {
-                    if (part.language.isNotBlank()) {
-                        Text(part.language, color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().background(Color(0xFF202633)).padding(start = 12.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(part.language.ifBlank { "код" }, color = Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.weight(1f))
+                        IconButton(
+                            onClick = {
+                                clipboard.setText(AnnotatedString(part.text.trimEnd('\n')))
+                                Toast.makeText(context, "Код скопирован", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.size(36.dp)
+                        ) { Icon(Icons.Outlined.ContentCopy, "Скопировать код", tint = Muted, modifier = Modifier.size(16.dp)) }
                     }
                     Text(
-                        part.text,
+                        part.text.trimEnd('\n'),
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                        color = Color(0xFFD7DEEA)
+                        lineHeight = 18.sp,
+                        color = Color(0xFFD7DEEA),
+                        softWrap = false
                     )
                 }
             } else if (part.text.isNotBlank()) {

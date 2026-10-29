@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -34,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,12 +44,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.opencode.mobile.ai.ProviderUrlPolicy
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.ProviderPreset
 import dev.opencode.mobile.shell.Shell
 
 @Composable
@@ -57,14 +62,24 @@ fun SettingsScreen(vm: AppViewModel) {
     val context = LocalContext.current
     var editing by remember { mutableStateOf<Provider?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var selectedPreset by remember { mutableStateOf<ProviderPreset?>(null) }
+    var newProvider by remember { mutableStateOf<Provider?>(null) }
+    var showCatalog by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
+
+    LaunchedEffect(ui.openProviderCatalog) {
+        if (ui.openProviderCatalog) {
+            showCatalog = true
+            vm.consumeProviderCatalogRequest()
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
     ) {
-        ScreenHeader(title = "Настройки", subtitle = "OpenCode Mobile 0.2.0")
+        ScreenHeader(title = "Настройки", subtitle = "OpenCode Mobile 0.3.0")
         ui.storageError?.let { error ->
             Text(error, color = Danger, fontSize = 12.sp, modifier = Modifier.padding(14.dp))
         }
@@ -80,7 +95,7 @@ fun SettingsScreen(vm: AppViewModel) {
             )
         }
         Row(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
-            TextButton(onClick = { creating = true }) {
+            TextButton(onClick = { showCatalog = true }) {
                 Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                 Text(" Добавить провайдера", fontSize = 12.sp)
             }
@@ -156,7 +171,7 @@ fun SettingsScreen(vm: AppViewModel) {
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "Провайдеры: OpenAI, Anthropic, OpenRouter, Ollama/LM Studio (локальные модели). " +
+                "Каталог содержит Alibaba Cloud, DeepSeek, Gemini и другие совместимые API. " +
                     "Ключи хранятся только на устройстве.",
                 fontSize = 12.sp,
                 color = Muted
@@ -165,14 +180,31 @@ fun SettingsScreen(vm: AppViewModel) {
         Spacer(Modifier.height(80.dp))
     }
 
+    if (showCatalog) {
+        ProviderCatalogSheet(
+            onDismiss = { showCatalog = false },
+            onPreset = { preset ->
+                selectedPreset = preset
+                newProvider = preset.createProvider()
+                showCatalog = false
+                creating = true
+            },
+            onCustom = {
+                selectedPreset = null
+                newProvider = null
+                showCatalog = false
+                creating = true
+            }
+        )
+    }
     if (creating) {
-        ProviderDialog(provider = null, onDismiss = { creating = false }) { provider ->
+        ProviderDialog(provider = newProvider, isNew = true, note = selectedPreset?.note.orEmpty(), onDismiss = { creating = false }) { provider ->
             vm.addProvider(provider)
             creating = false
         }
     }
     editing?.let { provider ->
-        ProviderDialog(provider = provider, onDismiss = { editing = null }) { updated ->
+        ProviderDialog(provider = provider, isNew = false, onDismiss = { editing = null }) { updated ->
             vm.updateProvider(updated)
             editing = null
         }
@@ -352,63 +384,58 @@ private fun RootSettingsCard(vm: AppViewModel) {
 }
 
 @Composable
-private fun ProviderDialog(provider: Provider?, onDismiss: () -> Unit, onSave: (Provider) -> Unit) {
-    var name by remember { mutableStateOf(provider?.name ?: "") }
-    var baseUrl by remember { mutableStateOf(provider?.baseUrl ?: "https://api.openai.com/v1") }
-    var apiKey by remember { mutableStateOf(provider?.apiKey ?: "") }
-    var model by remember { mutableStateOf(provider?.model ?: "") }
-    var kind by remember { mutableStateOf(provider?.kind ?: "openai") }
+private fun ProviderDialog(
+    provider: Provider?,
+    isNew: Boolean,
+    note: String = "",
+    onDismiss: () -> Unit,
+    onSave: (Provider) -> Unit
+) {
+    var name by remember(provider?.id) { mutableStateOf(provider?.name ?: "") }
+    var baseUrl by remember(provider?.id) { mutableStateOf(provider?.baseUrl ?: "https://api.openai.com/v1") }
+    var apiKey by remember(provider?.id) { mutableStateOf(provider?.apiKey ?: "") }
+    var model by remember(provider?.id) { mutableStateOf(provider?.model ?: "") }
+    var kind by remember(provider?.id) { mutableStateOf(provider?.kind ?: "openai") }
+    val urlError = if (baseUrl.isBlank()) null else ProviderUrlPolicy.error(baseUrl, apiKey)
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (provider == null) "Новый провайдер" else "Провайдер") },
+        title = { Text(if (isNew) "Новый провайдер" else "Настроить провайдера") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Название") }, singleLine = true)
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (note.isNotBlank()) Text(note, fontSize = 11.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(value = name, onValueChange = { name = it }, modifier = Modifier.fillMaxWidth().testTag("provider-name"), label = { Text("Название") }, singleLine = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Chip(
-                        "OpenAI-совместимый",
-                        color = if (kind == "openai") Accent else Muted,
-                        onClick = { kind = "openai" }
-                    )
-                    Chip(
-                        "Anthropic",
-                        color = if (kind == "anthropic") Accent else Muted,
-                        onClick = { kind = "anthropic" }
-                    )
+                    Chip("OpenAI-совместимый", color = if (kind == "openai") Accent else Muted, onClick = { kind = "openai" })
+                    Chip("Anthropic", color = if (kind == "anthropic") Accent else Muted, onClick = { kind = "anthropic" })
                 }
-                OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true)
                 OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    label = { Text("API-ключ") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    singleLine = true
+                    value = baseUrl, onValueChange = { baseUrl = it },
+                    modifier = Modifier.fillMaxWidth().testTag("provider-url"),
+                    label = { Text("Base URL") }, singleLine = true, isError = urlError != null
                 )
-                OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Модель") }, singleLine = true)
+                if (urlError != null) Text(urlError, color = Danger, fontSize = 11.sp, lineHeight = 15.sp)
+                OutlinedTextField(
+                    value = apiKey, onValueChange = { apiKey = it }, modifier = Modifier.fillMaxWidth().testTag("provider-key"),
+                    label = { Text("API-ключ") }, visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true
+                )
+                OutlinedTextField(value = model, onValueChange = { model = it }, modifier = Modifier.fillMaxWidth().testTag("provider-model"), label = { Text("Модель") }, singleLine = true)
                 Text(
-                    "Ollama на телефоне: http://127.0.0.1:11434/v1; на ПК из Android Emulator: http://10.0.2.2:11434/v1. HTTP разрешён только локально и без API-ключа; данные при этом не шифруются.",
-                    fontSize = 10.sp,
-                    color = Muted
+                    "Адрес и ID модели можно изменить. HTTP разрешён только для локального сервера и без API-ключа; данные при этом не шифруются.",
+                    fontSize = 10.sp, color = Muted, lineHeight = 15.sp
                 )
             }
         },
         confirmButton = {
             TextButton(
-                enabled = name.isNotBlank() && baseUrl.isNotBlank() && model.isNotBlank(),
+                enabled = name.isNotBlank() && baseUrl.isNotBlank() && model.isNotBlank() && urlError == null,
                 onClick = {
-                    val result = (provider ?: Provider(
-                        name = name,
-                        baseUrl = baseUrl,
-                        model = model
-                    )).copy(
-                        name = name.trim(),
-                        baseUrl = baseUrl.trim(),
-                        apiKey = apiKey.trim(),
-                        model = model.trim(),
-                        kind = kind
-                    )
+                    val result = (provider ?: Provider(name = name.trim(), baseUrl = baseUrl.trim(), model = model.trim()))
+                        .withModel(model).copy(name = name.trim(), baseUrl = baseUrl.trim(), apiKey = apiKey.trim(), kind = kind)
                     onSave(result)
                 }
             ) { Text("Сохранить") }

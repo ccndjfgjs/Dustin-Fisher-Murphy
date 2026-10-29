@@ -27,6 +27,15 @@ class HistoryAdapterTest {
         assertEquals("успешно", result[3].content)
     }
 
+    @Test fun preservesGeminiToolSignatureInHistory() {
+        val history = listOf(
+            ChatMessage(role = Role.USER, content = "проверь"),
+            ChatMessage(role = Role.ASSISTANT, toolCalls = listOf(ToolCallRef("a", "read_file", "{}", "opaque-signature"))),
+            ChatMessage(role = Role.TOOL, content = "ok", toolCallId = "a")
+        )
+        assertEquals("opaque-signature", HistoryAdapter.toAiMessages(history)[1].toolCalls.single().googleThoughtSignature)
+    }
+
     @Test fun keepsNormalConversation() {
         val history = listOf(
             ChatMessage(role = Role.USER, content = "hello"),

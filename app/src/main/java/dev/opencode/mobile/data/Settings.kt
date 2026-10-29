@@ -24,6 +24,13 @@ data class Provider(
 ) {
     val models: List<String> get() = (listOf(model) + extraModels).distinct().filter { it.isNotBlank() }
 
+    /** Switching models must not discard the previously selected model. */
+    fun withModel(selected: String): Provider {
+        val value = selected.trim()
+        if (value.isEmpty()) return this
+        return copy(model = value, extraModels = models.filterNot { it == value })
+    }
+
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
         .put("name", name)
@@ -104,6 +111,15 @@ data class AppSettings(
     val activeProvider: Provider
         get() = providers.firstOrNull { it.id == activeProviderId } ?: providers.firstOrNull()
             ?: Provider.defaults().first()
+
+    /** Change provider and model in one update, preserving all other providers and keys. */
+    fun withSelectedModel(providerId: String, model: String): AppSettings {
+        if (model.isBlank() || providers.none { it.id == providerId }) return this
+        return copy(
+            activeProviderId = providerId,
+            providers = providers.map { if (it.id == providerId) it.withModel(model) else it }
+        )
+    }
 
     fun toJson(): JSONObject {
         val arr = JSONArray()

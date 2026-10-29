@@ -11,18 +11,23 @@ enum class Role { USER, ASSISTANT, TOOL }
 data class ToolCallRef(
     val id: String,
     val name: String,
-    val arguments: String
+    val arguments: String,
+    // Gemini 3 requires its opaque signature back with a tool call within the same turn.
+    val googleThoughtSignature: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
         .put("name", name)
         .put("arguments", arguments)
+        .apply { googleThoughtSignature?.let { put("googleThoughtSignature", it) } }
 
     companion object {
         fun fromJson(o: JSONObject): ToolCallRef = ToolCallRef(
             id = o.optString("id"),
             name = o.optString("name"),
-            arguments = o.optString("arguments", "{}")
+            arguments = o.optString("arguments", "{}"),
+            googleThoughtSignature = if (o.isNull("googleThoughtSignature")) null
+                else o.optString("googleThoughtSignature").takeIf { it.isNotEmpty() }
         )
     }
 }

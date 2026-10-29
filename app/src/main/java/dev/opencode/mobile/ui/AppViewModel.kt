@@ -43,6 +43,7 @@ data class UiState(
     val entries: List<FileEntry> = emptyList(),
     val sessions: List<SessionSummary> = emptyList(),
     val session: ChatSession? = null,
+    val chatDraft: String = "",
     val busy: Boolean = false,
     val status: String = "",
     val approval: PendingApproval? = null,
@@ -58,6 +59,7 @@ data class UiState(
     val error: String? = null,
     val toast: String? = null,
     val storageError: String? = null,
+    val openProviderCatalog: Boolean = false,
     val settings: AppSettings = AppSettings()
 )
 
@@ -76,6 +78,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var lastChunkFlush = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
     private var agentRunId = 0L
+    // Drafts survive navigation and session changes while the app process remains alive.
+    private val chatDrafts = mutableMapOf<String, String>()
 
     init {
         ui = ui.copy(settings = application.prefs.settings.value)
@@ -207,6 +211,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (ui.session != null) return
         if (loaded != null) {
             val session = accessibleSession(loaded)
+            if (ui.chatDraft.isNotEmpty()) chatDrafts[session.id] = ui.chatDraft
             ui = ui.copy(session = session, workspace = session.cwd)
             refreshEntries()
         } else {
@@ -228,7 +233,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun newSession() {
         if (sessionChangeBlocked()) return
         val session = ChatSession(cwd = ui.workspace)
-        ui = ui.copy(session = session, todos = emptyList(), screen = Screen.CHAT)
+        val draft = if (ui.session == null) ui.chatDraft else ""
+        if (draft.isNotEmpty()) chatDrafts[session.id] = draft
+        ui = ui.copy(session = session, chatDraft = draft, todos = emptyList(), screen = Screen.CHAT)
         application.prefs.update { it.copy(lastSessionId = session.id) }
         if (!store.save(session)) ui = ui.copy(toast = "Не удалось сохранить сессию")
         refreshSessions()
@@ -240,7 +247,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val loaded = withContext(Dispatchers.IO) { store.load(id) } ?: return@launch
             if (sessionChangeBlocked()) return@launch
             val session = accessibleSession(loaded)
-            ui = ui.copy(session = session, workspace = session.cwd, screen = Screen.CHAT, todos = emptyList())
+            ui = ui.copy(session = session, chatDraft = chatDrafts[session.id].orEmpty(), workspace = session.cwd, screen = Screen.CHAT, todos = emptyList())
             application.prefs.update { it.copy(lastSessionId = id, lastWorkspace = session.cwd) }
             refreshEntries()
         }
@@ -250,6 +257,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (sessionChangeBlocked()) return
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.delete(id) }
+            chatDrafts.remove(id)
             if (ui.session?.id == id) newSession()
             refreshSessions()
         }
@@ -268,6 +276,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------- чат ----------
+
+    fun updateChatDraft(value: String) {
+        ui.session?.id?.let { chatDrafts[it] = value }
+        ui = ui.copy(chatDraft = value)
+    }
 
     fun sendMessage(raw: String) {
         val text = raw.trim()
@@ -471,14 +484,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setActiveProvider(id: String) {
-        application.prefs.update { it.copy(activeProviderId = id) }
+        application.prefs.update { s ->
+            if (s.providers.any { it.id == id }) s.copy(activeProviderId = id) else s
+        }
+    }
+
+    fun selectProviderModel(providerId: String, model: String) {
+        application.prefs.update { it.withSelectedModel(providerId, model) }
     }
 
     fun setModel(model: String) {
-        application.prefs.update { s ->
-            val active = s.activeProvider
-            s.copy(providers = s.providers.map { if (it.id == active.id) it.copy(model = model) else it })
-        }
+        application.prefs.update { s -> s.withSelectedModel(s.activeProvider.id, model) }
+    }
+
+    fun openProviderCatalog() {
+        ui = ui.copy(screen = Screen.SETTINGS, openProviderCatalog = true)
+    }
+
+    fun consumeProviderCatalogRequest() {
+        ui = ui.copy(openProviderCatalog = false)
     }
 
     // ---------- терминал ----------
