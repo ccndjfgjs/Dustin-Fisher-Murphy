@@ -27,7 +27,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee "$RUNNER_TEMP/build.log"
+          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace --no-daemon 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Annotate failures
         if: steps.build.outcome == 'failure'
         shell: bash
@@ -131,7 +131,9 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: set -o pipefail; ./gradlew :app:connectedDebugAndroidTest --stacktrace --no-daemon 2>&1 | tee "$RUNNER_TEMP/emulator-test.log"
+          # android-emulator-runner executes this under /bin/sh, so explicitly invoke bash.
+          script: >-
+            bash -o pipefail -c './gradlew :app:connectedDebugAndroidTest --stacktrace --no-daemon 2>&1 | tee "$RUNNER_TEMP/emulator-test.log"'
       - name: Annotate test failures
         if: steps.emulator.outcome == 'failure'
         shell: bash

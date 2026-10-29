@@ -32,22 +32,23 @@ Android требует, чтобы APK был подписан. Внешний �
 
 ### Создание постоянного upload/release-ключа (один раз)
 
-Нужен JDK 17. Запускайте в интерактивном терминале **на своём компьютере**, вне репозитория:
+Нужен JDK 17. Запустите скрипт в интерактивном терминале **на своём компьютере**:
 
 ```bash
-mkdir -p "$HOME/opencode-signing"
-chmod 700 "$HOME/opencode-signing"
-keytool -genkeypair -v \
-  -keystore "$HOME/opencode-signing/upload-key.p12" -storetype PKCS12 \
-  -alias opencode-upload -keyalg RSA -keysize 3072 -validity 10000
+./scripts/create-release-key.sh
 ```
 
-`keytool` сам спросит пароль и сведения для сертификата. Сохраните пароль и файл в защищённом хранилище и создайте резервную копию. Для PKCS12 используйте один пароль для хранилища и ключа. Получить **публичный** сертификат и его SHA-256 можно так:
+Скрипт создаст `~/opencode-signing/upload-key.p12` и публичный `~/opencode-signing/upload-certificate.pem`. `keytool` сам спросит пароль и сведения для сертификата. Скрипт не перезаписывает существующие файлы и не создаёт ключ внутри репозитория. Сохраните пароль и файл в защищённом хранилище и создайте резервную копию. Для PKCS12 используйте один пароль для хранилища и ключа. Показать SHA-256 сертификата:
+
+```bash
+keytool -list -v -keystore "$HOME/opencode-signing/upload-key.p12" -alias opencode-upload
+```
+
+Если ключ создан, но экспорт сертификата не завершился, повторите только экспорт:
 
 ```bash
 keytool -exportcert -rfc -keystore "$HOME/opencode-signing/upload-key.p12" \
   -alias opencode-upload -file "$HOME/opencode-signing/upload-certificate.pem"
-keytool -list -v -keystore "$HOME/opencode-signing/upload-key.p12" -alias opencode-upload
 ```
 
 `upload-certificate.pem` содержит только публичный сертификат; `upload-key.p12` — секретный приватный ключ. Для Google Play App Signing этот ключ обычно является **upload key**; конечный сертификат подписи приложения может управляться Google Play и отличаться. Настройка аккаунта Play и принятие приложения требуют действий владельца.
