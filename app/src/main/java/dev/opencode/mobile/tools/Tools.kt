@@ -38,13 +38,17 @@ data class ToolOutcome(
     val ok: Boolean,
     val output: String,
     val title: String,
-    val filesTouched: List<String> = emptyList()
+    val filesTouched: List<String> = emptyList(),
+    val fileUndo: dev.opencode.mobile.data.FileUndo? = null
 )
 
 data class ToolContext(
     val cwd: String,
     val useRoot: Boolean,
     val sandboxed: Boolean,
+    val planMode: Boolean = false,
+    val gitExecutable: String = "git",
+    val gitCommitApproved: Boolean = false,
     val onChunk: (String) -> Unit = {},
     val onTodo: (List<dev.opencode.mobile.data.TodoItem>) -> Unit = {}
 )
@@ -216,11 +220,23 @@ object Tools {
             name = "device_info",
             description = "Информация об устройстве: Android, ABI, root, SELinux, свободное место.",
             parameters = schema(emptyMap(), emptyList())
+        ),
+        ToolSpec(
+            name = "git_diff",
+            description = "Показать Git diff в корне выбранного проекта. staged=true показывает подготовленные изменения.",
+            parameters = schema(mapOf("staged" to bool("Показать индекс вместо рабочей копии")), emptyList())
+        ),
+        ToolSpec(
+            name = "git_commit",
+            description = "Создать коммит ТОЛЬКО из уже подготовленных изменений. Всегда требует отдельного подтверждения пользователя с diff. Файлы не добавляются автоматически; hooks и подпись отключены.",
+            parameters = schema(mapOf("message" to str("Сообщение коммита")), listOf("message"))
         )
     )
 
     // Network requests can transmit URL parameters, so web_fetch requires approval.
     val readOnly: Set<String> = setOf("read_file", "list_dir", "glob", "grep", "device_info")
+    // Plan mode is an explicit allowlist, including only the in-memory todo list in addition to reads.
+    val planAllowed: Set<String> = readOnly + "todo_write"
 
     fun resolve(cwd: String, path: String): File {
         val p = File(path)
@@ -228,20 +244,30 @@ object Tools {
     }
 
     suspend fun execute(name: String, args: JSONObject, ctx: ToolContext): ToolOutcome = withContext(Dispatchers.IO) {
-        try {
+        if (ctx.planMode && name !in planAllowed) {
+            return@withContext ToolOutcome(false, "Режим плана: инструмент $name заблокирован. Для изменений переключитесь в режим агента.", "Заблокировано")
+        }
+        // Even a caller accidentally supplying root cannot elevate a plan-mode read.
+        val effective = if (ctx.planMode) ctx.copy(useRoot = false, sandboxed = true) else ctx
+        val directEdit = name == "write_file" || name == "edit_file"
+        val before = if (directEdit) runCatching {
+            FileUndoManager.prepare(effective.cwd, args.optString("path"), effective.useRoot)
+        }.getOrNull() else null
+        val outcome = try {
             when (name) {
-                "read_file" -> readFile(args, ctx)
-                "write_file" -> writeFile(args, ctx)
-                "edit_file" -> editFile(args, ctx)
-                "list_dir" -> listDir(args, ctx)
-                "glob" -> glob(args, ctx)
-                "grep" -> grep(args, ctx)
-                "run_command" -> runCommand(args, ctx)
-                "delete_path" -> deletePath(args, ctx)
-                "move_path" -> movePath(args, ctx)
-                "todo_write" -> todoWrite(args, ctx)
+                "read_file" -> readFile(args, effective)
+                "write_file" -> writeFile(args, effective)
+                "edit_file" -> editFile(args, effective)
+                "list_dir" -> listDir(args, effective)
+                "glob" -> glob(args, effective)
+                "grep" -> grep(args, effective)
+                "run_command" -> runCommand(args, effective)
+                "delete_path" -> deletePath(args, effective)
+                "move_path" -> movePath(args, effective)
+                "todo_write" -> todoWrite(args, effective)
                 "web_fetch" -> webFetch(args)
-                "device_info" -> deviceInfo(ctx)
+                "device_info" -> deviceInfo(effective)
+                "git_diff", "git_commit" -> GitTools.execute(name, args, effective)
                 else -> ToolOutcome(false, "Неизвестный инструмент: $name", "Ошибка")
             }
         } catch (cancelled: CancellationException) {
@@ -249,6 +275,13 @@ object Tools {
         } catch (t: Exception) {
             ToolOutcome(false, "Ошибка инструмента $name: ${t.message ?: t.javaClass.simpleName}", "Ошибка")
         }
+        if (!directEdit) return@withContext outcome
+        val undo = before?.let { runCatching { FileUndoManager.finish(effective.cwd, it) }.getOrNull() }
+        if (undo != null && (outcome.ok || !undo.existedBefore || undo.beforeHash != undo.afterHash)) {
+            outcome.copy(fileUndo = undo)
+        } else if (outcome.ok || before == null) {
+            outcome.copy(output = outcome.output + "\nОткат этой правки недоступен (root, симлинк, путь вне проекта, размер или права).")
+        } else outcome
     }
 
     private fun isAllowed(file: File, ctx: ToolContext): Boolean {
@@ -558,7 +591,7 @@ object Tools {
         .trim()
 
     private fun deviceInfo(ctx: ToolContext): ToolOutcome {
-        val root = Shell.rootStatus()
+        val root = if (ctx.planMode) dev.opencode.mobile.shell.RootStatus(false) else Shell.rootStatus()
         val rt = Runtime.getRuntime()
         val stat = android.os.StatFs(ctx.cwd.takeIf { File(it).exists() } ?: "/sdcard")
         val freeGb = stat.availableBytes / 1024.0 / 1024.0 / 1024.0

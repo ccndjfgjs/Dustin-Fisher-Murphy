@@ -32,15 +32,51 @@ data class ToolCallRef(
     }
 }
 
+/** Complete Anthropic content blocks, in original order, tied to their source. */
+data class AnthropicTrace(
+    val providerId: String,
+    val baseUrl: String,
+    val model: String,
+    val blocks: List<String>
+) {
+    fun toJson(): JSONObject = JSONObject().put("providerId", providerId).put("baseUrl", baseUrl)
+        .put("model", model).put("blocks", JSONArray(blocks))
+
+    companion object {
+        fun fromJson(o: JSONObject): AnthropicTrace {
+            val blocks = mutableListOf<String>()
+            o.optJSONArray("blocks")?.let { arr ->
+                for (i in 0 until arr.length()) blocks.add(arr.optString(i))
+            }
+            return AnthropicTrace(o.optString("providerId"), o.optString("baseUrl"), o.optString("model"), blocks)
+        }
+    }
+}
+
+data class ChatAttachment(val path: String, val content: String) {
+    fun toJson(): JSONObject = JSONObject().put("path", path).put("content", content)
+    companion object {
+        fun fromJson(o: JSONObject) = ChatAttachment(o.optString("path"), o.optString("content"))
+    }
+}
+
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val role: Role,
     val content: String = "",
+    val attachments: List<ChatAttachment> = emptyList(),
+    val reasoning: String = "",
+    val reasoningDurationMs: Long? = null,
+    val anthropicTrace: AnthropicTrace? = null,
+    val usage: TokenUsage? = null,
+    val fileUndo: FileUndo? = null,
     val toolCalls: List<ToolCallRef> = emptyList(),
     val toolCallId: String? = null,
     val toolName: String? = null,
     val toolArgs: String? = null,
     val toolOk: Boolean? = null,
+    // Client-side errors are displayed locally and never sent back as model output.
+    val errorStatus: Int? = null,
     val streaming: Boolean = false,
     val expanded: Boolean = false,
     val ts: Long = System.currentTimeMillis()
@@ -50,6 +86,12 @@ data class ChatMessage(
         o.put("id", id)
         o.put("role", role.name)
         o.put("content", content)
+        if (attachments.isNotEmpty()) o.put("attachments", JSONArray().apply { attachments.forEach { put(it.toJson()) } })
+        if (reasoning.isNotEmpty()) o.put("reasoning", reasoning)
+        reasoningDurationMs?.let { o.put("reasoningDurationMs", it) }
+        anthropicTrace?.let { o.put("anthropicTrace", it.toJson()) }
+        usage?.let { o.put("usage", it.toJson()) }
+        fileUndo?.let { o.put("fileUndo", it.toJson()) }
         o.put("ts", ts)
         o.put("expanded", expanded)
         if (toolCalls.isNotEmpty()) {
@@ -61,6 +103,7 @@ data class ChatMessage(
         toolName?.let { o.put("toolName", it) }
         toolArgs?.let { o.put("toolArgs", it) }
         toolOk?.let { o.put("toolOk", it) }
+        errorStatus?.let { o.put("errorStatus", it) }
         return o
     }
 
@@ -74,11 +117,20 @@ data class ChatMessage(
                 id = o.optString("id", UUID.randomUUID().toString()),
                 role = runCatching { Role.valueOf(o.optString("role", "USER")) }.getOrDefault(Role.USER),
                 content = o.optString("content", ""),
+                attachments = o.optJSONArray("attachments")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { index -> arr.optJSONObject(index)?.let { ChatAttachment.fromJson(it) } }
+                } ?: emptyList(),
+                reasoning = o.optString("reasoning", ""),
+                reasoningDurationMs = if (!o.isNull("reasoningDurationMs")) o.optLong("reasoningDurationMs") else null,
+                anthropicTrace = o.optJSONObject("anthropicTrace")?.let { AnthropicTrace.fromJson(it) },
+                usage = o.optJSONObject("usage")?.let { TokenUsage.fromJson(it) },
+                fileUndo = o.optJSONObject("fileUndo")?.let { FileUndo.fromJson(it) },
                 toolCalls = calls,
                 toolCallId = if (o.has("toolCallId")) o.optString("toolCallId") else null,
                 toolName = if (o.has("toolName")) o.optString("toolName") else null,
                 toolArgs = if (o.has("toolArgs")) o.optString("toolArgs") else null,
                 toolOk = if (o.has("toolOk")) o.optBoolean("toolOk") else null,
+                errorStatus = if (!o.isNull("errorStatus")) o.optInt("errorStatus") else null,
                 expanded = o.optBoolean("expanded", false),
                 ts = o.optLong("ts", System.currentTimeMillis())
             )
@@ -89,6 +141,7 @@ data class ChatMessage(
 data class ChatSession(
     val id: String = UUID.randomUUID().toString(),
     val title: String = "Новая сессия",
+    val titleManuallySet: Boolean = false,
     val cwd: String,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
@@ -98,6 +151,7 @@ data class ChatSession(
         val o = JSONObject()
         o.put("id", id)
         o.put("title", title)
+        if (titleManuallySet) o.put("titleManuallySet", true)
         o.put("cwd", cwd)
         o.put("createdAt", createdAt)
         o.put("updatedAt", updatedAt)
@@ -117,6 +171,7 @@ data class ChatSession(
             return ChatSession(
                 id = o.optString("id", UUID.randomUUID().toString()),
                 title = o.optString("title", "Сессия"),
+                titleManuallySet = o.optBoolean("titleManuallySet", false),
                 cwd = o.optString("cwd", "/sdcard"),
                 createdAt = ms,
                 updatedAt = o.optLong("updatedAt", ms),

@@ -27,8 +27,11 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -43,14 +46,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.opencode.mobile.ai.ProviderRequestPolicy
 import dev.opencode.mobile.ai.ProviderUrlPolicy
+import dev.opencode.mobile.data.McpServer
+import dev.opencode.mobile.data.ModelPricing
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.ProviderPreset
 import dev.opencode.mobile.shell.Shell
@@ -66,6 +74,9 @@ fun SettingsScreen(vm: AppViewModel) {
     var newProvider by remember { mutableStateOf<Provider?>(null) }
     var showCatalog by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
+    var editingMcp by remember { mutableStateOf<McpServer?>(null) }
+    var creatingMcp by remember { mutableStateOf(false) }
+    var deletingMcp by remember { mutableStateOf<McpServer?>(null) }
 
     LaunchedEffect(ui.openProviderCatalog) {
         if (ui.openProviderCatalog) {
@@ -115,7 +126,7 @@ fun SettingsScreen(vm: AppViewModel) {
         )
         SwitchRow(
             title = "Авто-подтверждение",
-            subtitle = "Не спрашивать перед изменением файлов и командами",
+            subtitle = "Не спрашивать перед файловыми изменениями; shell, Git-коммит и MCP всегда требуют подтверждения",
             checked = settings.autoApproveTools,
             onChange = { value -> vm.saveSettings { it.copy(autoApproveTools = value) } }
         )
@@ -136,6 +147,38 @@ fun SettingsScreen(vm: AppViewModel) {
             placeholder = "Например: используй Python 3, пиши комментарии по-русски…",
             onChange = { value -> vm.saveSettings { it.copy(systemAppend = value) } }
         )
+
+        Section("MCP · Streamable HTTP")
+        settings.mcpServers.forEach { server ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+                .clip(RoundedCornerShape(12.dp)).background(SurfaceColor).padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(server.name, fontSize = 13.sp)
+                    Text(if (server.enabled) server.url else "Выключен · ${server.url}", color = Muted, fontSize = 10.sp, maxLines = 1)
+                }
+                Switch(checked = server.enabled, onCheckedChange = { enabled ->
+                    vm.saveSettings { it.copy(mcpServers = it.mcpServers.map { item -> if (item.id == server.id) item.copy(enabled = enabled) else item }) }
+                })
+                IconButton(onClick = { editingMcp = server }) { Icon(Icons.Default.Edit, "Изменить MCP ${server.name}") }
+                IconButton(onClick = { deletingMcp = server }) {
+                    Icon(Icons.Default.Delete, "Удалить MCP ${server.name}")
+                }
+            }
+        }
+        TextButton(onClick = { creatingMcp = true }, modifier = Modifier.padding(horizontal = 12.dp), enabled = settings.mcpServers.size < 5) {
+            Icon(Icons.Default.Add, null, Modifier.size(16.dp)); Text(" Добавить MCP-сервер")
+        }
+        Text("Подключайте только доверенные серверы. Вызовы MCP и все изменяющие действия при активном MCP требуют подтверждения. В режиме плана подключение заблокировано.",
+            color = Muted, fontSize = 10.sp, lineHeight = 15.sp, modifier = Modifier.padding(horizontal = 16.dp))
+
+        Section("Git")
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+            OutlinedTextField(value = settings.gitExecutable, onValueChange = { value -> vm.saveSettings { it.copy(gitExecutable = value) } },
+                label = { Text("Исполняемый файл Git") }, singleLine = true, modifier = Modifier.fillMaxWidth().testTag("git-executable"))
+            Text("Git должен быть отдельно установлен и доступен приложению. Коммит только из индекса, без hooks и подписи, с отдельным подтверждением.",
+                color = Muted, fontSize = 10.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 6.dp))
+        }
 
         Section("Устройство")
         RootSettingsCard(vm)
@@ -208,6 +251,25 @@ fun SettingsScreen(vm: AppViewModel) {
             vm.updateProvider(updated)
             editing = null
         }
+    }
+    if (creatingMcp || editingMcp != null) {
+        McpDialog(server = editingMcp, onDismiss = { creatingMcp = false; editingMcp = null }) { server ->
+            vm.saveSettings { settings ->
+                val others = settings.mcpServers.filterNot { it.id == server.id }
+                settings.copy(mcpServers = (others + server).take(5))
+            }
+            creatingMcp = false
+            editingMcp = null
+        }
+    }
+    deletingMcp?.let { server ->
+        AlertDialog(onDismissRequest = { deletingMcp = null }, title = { Text("Удалить MCP-сервер?") },
+            text = { Text("Настройки и сохранённый токен «${server.name}» будут удалены.") },
+            confirmButton = { TextButton(onClick = {
+                vm.saveSettings { it.copy(mcpServers = it.mcpServers.filterNot { item -> item.id == server.id }) }
+                deletingMcp = null
+            }) { Text("Удалить", color = Danger) } },
+            dismissButton = { TextButton(onClick = { deletingMcp = null }) { Text("Отмена") } })
     }
     if (showModels) {
         ModelDialog(
@@ -384,7 +446,37 @@ private fun RootSettingsCard(vm: AppViewModel) {
 }
 
 @Composable
-private fun ProviderDialog(
+internal fun McpDialog(server: McpServer?, onDismiss: () -> Unit, onSave: (McpServer) -> Unit) {
+    var name by remember(server?.id) { mutableStateOf(server?.name.orEmpty()) }
+    var url by remember(server?.id) { mutableStateOf(server?.url ?: "https://") }
+    var token by remember(server?.id) { mutableStateOf(server?.bearerToken.orEmpty()) }
+    var visible by remember(server?.id) { mutableStateOf(false) }
+    val error = if (url.isBlank()) null else ProviderUrlPolicy.error(url, token)
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (server == null) "Добавить MCP-сервер" else "Настроить MCP-сервер") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Streamable HTTP, версия 2025-03-26. Сервер получает аргументы разрешённых вами инструментов.", fontSize = 11.sp, color = Muted)
+                OutlinedTextField(value = name, onValueChange = { name = it.take(80) }, label = { Text("Название") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("mcp-name"))
+                OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("URL endpoint") }, singleLine = true,
+                    isError = error != null, modifier = Modifier.fillMaxWidth().testTag("mcp-url"))
+                if (error != null) Text(error, color = Danger, fontSize = 11.sp)
+                OutlinedTextField(value = token, onValueChange = { token = it }, label = { Text("Bearer-токен (необязательно)") }, singleLine = true,
+                    visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = if (visible) KeyboardType.Text else KeyboardType.Password, autoCorrect = false),
+                    trailingIcon = { IconButton(onClick = { visible = !visible }) {
+                        Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (visible) "Скрыть токен MCP" else "Показать токен MCP")
+                    } }, modifier = Modifier.fillMaxWidth().testTag("mcp-token"))
+                Text("Токен хранится в зашифрованных настройках и не отправляется по HTTP. OAuth, stdio, ресурсы и prompts пока не поддерживаются.", color = Muted, fontSize = 10.sp)
+            }
+        },
+        confirmButton = { TextButton(enabled = name.isNotBlank() && url.isNotBlank() && error == null,
+            onClick = { onSave((server ?: McpServer(name = name.trim(), url = url.trim())).copy(name = name.trim(), url = url.trim(), bearerToken = token.trim())) }) { Text("Сохранить") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } })
+}
+
+@Composable
+internal fun ProviderDialog(
     provider: Provider?,
     isNew: Boolean,
     note: String = "",
@@ -394,8 +486,25 @@ private fun ProviderDialog(
     var name by remember(provider?.id) { mutableStateOf(provider?.name ?: "") }
     var baseUrl by remember(provider?.id) { mutableStateOf(provider?.baseUrl ?: "https://api.openai.com/v1") }
     var apiKey by remember(provider?.id) { mutableStateOf(provider?.apiKey ?: "") }
+    var keyVisible by remember(provider?.id) { mutableStateOf(false) }
+    var clipboardHint by remember(provider?.id) { mutableStateOf<String?>(null) }
     var model by remember(provider?.id) { mutableStateOf(provider?.model ?: "") }
     var kind by remember(provider?.id) { mutableStateOf(provider?.kind ?: "openai") }
+    var streamUsage by remember(provider?.id) {
+        mutableStateOf(provider?.streamUsage ?: ProviderRequestPolicy.defaultStreamUsage(provider?.baseUrl ?: baseUrl))
+    }
+    val currentPricing = provider?.pricing?.firstOrNull {
+        it.model == model.trim() && provider?.baseUrl.orEmpty().trimEnd('/') == baseUrl.trim().trimEnd('/') && provider?.kind == kind
+    }
+    var inputRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.input?.toString().orEmpty()) }
+    var outputRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.output?.toString().orEmpty()) }
+    var cachedRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.cachedInput?.toString().orEmpty()) }
+    var writeRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.cacheWrite?.toString().orEmpty()) }
+    fun rate(value: String): Double? = value.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }
+    val ratesBlank = listOf(inputRate, outputRate, cachedRate, writeRate).all { it.isBlank() }
+    val ratesValid = ratesBlank || (rate(inputRate) != null && rate(outputRate) != null &&
+        (cachedRate.isBlank() || rate(cachedRate) != null) && (writeRate.isBlank() || rate(writeRate) != null))
+    val clipboard = LocalClipboardManager.current
     val urlError = if (baseUrl.isBlank()) null else ProviderUrlPolicy.error(baseUrl, apiKey)
 
     AlertDialog(
@@ -419,11 +528,58 @@ private fun ProviderDialog(
                 )
                 if (urlError != null) Text(urlError, color = Danger, fontSize = 11.sp, lineHeight = 15.sp)
                 OutlinedTextField(
-                    value = apiKey, onValueChange = { apiKey = it }, modifier = Modifier.fillMaxWidth().testTag("provider-key"),
-                    label = { Text("API-ключ") }, visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true
+                    value = apiKey,
+                    onValueChange = { apiKey = it; clipboardHint = null },
+                    modifier = Modifier.fillMaxWidth().testTag("provider-key"),
+                    label = { Text("API-ключ") },
+                    visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = if (keyVisible) KeyboardType.Text else KeyboardType.Password,
+                        autoCorrect = false
+                    ),
+                    trailingIcon = {
+                        IconButton(onClick = { keyVisible = !keyVisible }) {
+                            Icon(
+                                if (keyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (keyVisible) "Скрыть API-ключ" else "Показать API-ключ"
+                            )
+                        }
+                    },
+                    singleLine = true
                 )
+                TextButton(
+                    onClick = {
+                        // Clipboard access is explicit and limited to this foreground action.
+                        val text = runCatching { clipboard.getText()?.text?.trim() }.getOrNull()
+                        if (text.isNullOrEmpty()) {
+                            clipboardHint = "Не удалось вставить ключ: скопируйте текст и попробуйте снова. В эмуляторе проверьте синхронизацию буфера обмена."
+                        } else {
+                            apiKey = text
+                            clipboardHint = null
+                        }
+                    },
+                    modifier = Modifier.testTag("paste-provider-key")
+                ) { Text("Вставить из буфера") }
+                clipboardHint?.let { Text(it, color = Danger, fontSize = 11.sp, lineHeight = 15.sp) }
                 OutlinedTextField(value = model, onValueChange = { model = it }, modifier = Modifier.fillMaxWidth().testTag("provider-model"), label = { Text("Модель") }, singleLine = true)
+                if (kind == "openai") {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Запрашивать токены в потоке", fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Switch(checked = streamUsage, onCheckedChange = { streamUsage = it })
+                    }
+                    Text("Для несовместимых серверов отключите stream_options или используйте ответ без потока.", color = Muted, fontSize = 10.sp)
+                }
+                Text("Тариф этой модели · USD за 1 млн токенов (необязательно)", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                Text("Введите актуальные цены провайдера. Расчёт — оценка, не счёт; подписки, налоги и специальные тарифы не учитываются.", color = Muted, fontSize = 10.sp)
+                OutlinedTextField(value = inputRate, onValueChange = { inputRate = it }, singleLine = true,
+                    label = { Text("Вход, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth().testTag("price-input"))
+                OutlinedTextField(value = outputRate, onValueChange = { outputRate = it }, singleLine = true,
+                    label = { Text("Выход, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth().testTag("price-output"))
+                OutlinedTextField(value = cachedRate, onValueChange = { cachedRate = it }, singleLine = true,
+                    label = { Text("Чтение кэша, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = writeRate, onValueChange = { writeRate = it }, singleLine = true,
+                    label = { Text("Запись кэша, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                if (!ratesValid) Text("Заполните цены входа и выхода неотрицательными числами.", color = Danger, fontSize = 11.sp)
                 Text(
                     "Адрес и ID модели можно изменить. HTTP разрешён только для локального сервера и без API-ключа; данные при этом не шифруются.",
                     fontSize = 10.sp, color = Muted, lineHeight = 15.sp
@@ -432,10 +588,15 @@ private fun ProviderDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = name.isNotBlank() && baseUrl.isNotBlank() && model.isNotBlank() && urlError == null,
+                enabled = name.isNotBlank() && baseUrl.isNotBlank() && model.isNotBlank() && urlError == null && ratesValid,
                 onClick = {
+                    val previousPrices = if (provider != null && provider.baseUrl.trimEnd('/') == baseUrl.trim().trimEnd('/') && provider.kind == kind)
+                        provider.pricing else emptyList()
+                    val prices = previousPrices.filterNot { it.model == model.trim() }.toMutableList()
+                    if (!ratesBlank) prices.add(ModelPricing(model.trim(), rate(inputRate)!!, rate(outputRate)!!, rate(cachedRate), rate(writeRate)))
                     val result = (provider ?: Provider(name = name.trim(), baseUrl = baseUrl.trim(), model = model.trim()))
-                        .withModel(model).copy(name = name.trim(), baseUrl = baseUrl.trim(), apiKey = apiKey.trim(), kind = kind)
+                        .withModel(model).copy(name = name.trim(), baseUrl = baseUrl.trim(), apiKey = apiKey.trim(), kind = kind,
+                            pricing = prices, streamUsage = streamUsage)
                     onSave(result)
                 }
             ) { Text("Сохранить") }

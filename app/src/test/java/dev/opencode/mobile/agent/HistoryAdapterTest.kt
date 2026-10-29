@@ -36,6 +36,15 @@ class HistoryAdapterTest {
         assertEquals("opaque-signature", HistoryAdapter.toAiMessages(history)[1].toolCalls.single().googleThoughtSignature)
     }
 
+    @Test fun clientErrorsAreNotSentBackToTheModel() {
+        val history = listOf(
+            ChatMessage(role = Role.USER, content = "hello"),
+            ChatMessage(role = Role.ASSISTANT, content = "Проверьте API-ключ", errorStatus = 401),
+            ChatMessage(role = Role.USER, content = "try again")
+        )
+        assertEquals(listOf("hello", "try again"), HistoryAdapter.toAiMessages(history).map { it.content })
+    }
+
     @Test fun keepsNormalConversation() {
         val history = listOf(
             ChatMessage(role = Role.USER, content = "hello"),

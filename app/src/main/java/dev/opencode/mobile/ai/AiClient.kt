@@ -1,6 +1,11 @@
 package dev.opencode.mobile.ai
 
+import dev.opencode.mobile.data.AnthropicTrace
+import dev.opencode.mobile.data.ModelReasoningCatalog
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.ReasoningLevel
+import dev.opencode.mobile.data.ReasoningProtocol
+import dev.opencode.mobile.data.TokenUsage
 import dev.opencode.mobile.tools.ToolSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,7 +31,10 @@ data class AiMessage(
     val content: String = "",
     val toolCalls: List<AiToolCall> = emptyList(),
     val toolCallId: String? = null,
-    val toolName: String? = null
+    val toolName: String? = null,
+    val anthropicTrace: AnthropicTrace? = null,
+    // Local bookkeeping; never serialized as a vendor-specific message field.
+    val syntheticSummary: Boolean = false
 )
 
 data class AiRequest(
@@ -36,19 +44,27 @@ data class AiRequest(
     val tools: List<ToolSpec>,
     val temperature: Double = 0.2,
     val maxTokens: Int = 8192,
-    val stream: Boolean = true
+    val stream: Boolean = true,
+    val reasoningLevel: ReasoningLevel = ReasoningLevel.OFF
 )
 
 data class AiResponse(
     val content: String,
     val toolCalls: List<AiToolCall> = emptyList(),
-    val finishReason: String? = null
+    val finishReason: String? = null,
+    val reasoning: String = "",
+    val anthropicBlocks: List<String> = emptyList(),
+    val usage: TokenUsage? = null
 )
 
 class AiException(message: String, val status: Int = 0) : Exception(message)
 
 interface AiClient {
-    suspend fun complete(req: AiRequest, onDelta: suspend (String) -> Unit): AiResponse
+    suspend fun complete(
+        req: AiRequest,
+        onReasoning: suspend (String) -> Unit = {},
+        onDelta: suspend (String) -> Unit
+    ): AiResponse
     fun cancel()
 }
 
@@ -79,19 +95,22 @@ internal val sharedHttp: OkHttpClient = OkHttpClient.Builder()
     .connectTimeout(30, TimeUnit.SECONDS)
     .readTimeout(0, TimeUnit.MILLISECONDS)
     .writeTimeout(60, TimeUnit.SECONDS)
-    .retryOnConnectionFailure(true)
+    // Retries are managed explicitly so a partially received stream is never replayed.
+    .retryOnConnectionFailure(false)
     .build()
 
 /** Клиент для OpenAI Chat Completions и всех совместимых API (OpenRouter, Groq, Ollama, LM Studio, vLLM). */
 class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
 
     @Volatile private var currentCall: Call? = null
+    @Volatile private var cancelled = false
 
     override fun cancel() {
+        cancelled = true
         runCatching { currentCall?.cancel() }
     }
 
-    override suspend fun complete(req: AiRequest, onDelta: suspend (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
+    override suspend fun complete(req: AiRequest, onReasoning: suspend (String) -> Unit, onDelta: suspend (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
         val payload = buildPayload(req)
         val builder = Request.Builder()
             .url(AiClients.endpoint(provider.baseUrl, "chat/completions"))
@@ -102,19 +121,13 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
             builder.header("HTTP-Referer", "https://github.com/ccndjfgjs/Dustin-Fisher-Murphy")
             builder.header("X-Title", "OpenCode Mobile")
         }
-        val call = sharedHttp.newCall(builder.build())
-        currentCall = call
-        try {
-            call.execute().use { resp ->
-                val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
-                if (!resp.isSuccessful) {
-                    val err = runCatching { body.string() }.getOrDefault("")
-                    throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
-                }
-                parseStream(body.source(), onDelta)
+        RequestRetry.execute(builder.build(), onCall = { currentCall = it }, isCancelled = { cancelled }) { resp ->
+            val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
+            if (!resp.isSuccessful) {
+                val err = runCatching { resp.peekBody(8192).string() }.getOrDefault("")
+                throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
             }
-        } finally {
-            currentCall = null
+            parseStream(body.source(), onReasoning, onDelta)
         }
     }
 
@@ -122,13 +135,31 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         val root = JSONObject()
         root.put("model", req.model)
         root.put("stream", req.stream)
-        root.put("temperature", req.temperature)
-        root.put("max_tokens", req.maxTokens)
+        if (req.stream && (provider.streamUsage ?: ProviderRequestPolicy.defaultStreamUsage(provider.baseUrl))) {
+            root.put("stream_options", JSONObject().put("include_usage", true))
+        }
+        val protocol = ModelReasoningCatalog.capability(provider, req.model)?.protocol
+        if (protocol == ReasoningProtocol.OPENAI_EFFORT) {
+            // OpenAI o-series reject the legacy max_tokens and non-default temperature.
+            root.put("max_completion_tokens", req.maxTokens)
+            if (req.reasoningLevel != ReasoningLevel.OFF) root.put("reasoning_effort", req.reasoningLevel.name.lowercase())
+        } else {
+            root.put("temperature", req.temperature)
+            root.put("max_tokens", req.maxTokens)
+        }
         if (ProviderRequestPolicy.disableDeepSeekThinking(provider.baseUrl)) {
-            root.put("thinking", JSONObject().put("type", "disabled"))
+            val enabled = protocol == ReasoningProtocol.DEEPSEEK && req.reasoningLevel != ReasoningLevel.OFF
+            root.put("thinking", JSONObject().put("type", if (enabled) "enabled" else "disabled"))
+            if (enabled && req.model.startsWith("deepseek-v4")) {
+                root.put("reasoning_effort", if (req.reasoningLevel == ReasoningLevel.HIGH) "max" else "high")
+            }
         }
         if (ProviderRequestPolicy.disableAlibabaThinking(provider.baseUrl, req.model)) {
-            root.put("enable_thinking", false)
+            val enabled = protocol == ReasoningProtocol.ALIBABA_QWEN && req.reasoningLevel != ReasoningLevel.OFF
+            root.put("enable_thinking", enabled)
+            if (enabled && (req.model.startsWith("qwen3.7") || req.model.startsWith("qwen3.6"))) {
+                root.put("reasoning_effort", req.reasoningLevel.name.lowercase())
+            }
         }
         val messages = JSONArray()
         if (req.system.isNotBlank()) {
@@ -180,14 +211,21 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         return root
     }
 
-    internal suspend fun parseStream(source: BufferedSource, onDelta: suspend (String) -> Unit): AiResponse {
+    internal suspend fun parseStream(
+        source: BufferedSource,
+        onReasoning: suspend (String) -> Unit = {},
+        onDelta: suspend (String) -> Unit
+    ): AiResponse {
         val content = StringBuilder()
+        val reasoning = StringBuilder()
         val args = LinkedHashMap<Int, StringBuilder>()
         val names = HashMap<Int, String>()
         val ids = HashMap<Int, String>()
         val signatures = HashMap<Int, String>()
         var finish: String? = null
         var sawSse = false
+        var done = false
+        var usage: TokenUsage? = null
         val raw = StringBuilder()
 
         while (true) {
@@ -195,17 +233,23 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
             if (line.startsWith("data:")) {
                 sawSse = true
                 val data = line.substring(5).trim()
-                if (data == "[DONE]") break
+                if (data == "[DONE]") { done = true; break }
                 if (data.isEmpty()) continue
                 val obj = runCatching { JSONObject(data) }.getOrNull() ?: continue
                 if (obj.has("error")) {
                     val err = obj.opt("error")
                     throw AiException(err.toString())
                 }
+                UsageParser.openAi(obj.optJSONObject("usage"), ProviderRequestPolicy.isOpenRouter(provider.baseUrl))?.let { usage = it }
                 val choices = obj.optJSONArray("choices") ?: continue
                 val choice = choices.optJSONObject(0) ?: continue
                 val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message")
                 if (delta != null) {
+                    val thought = delta.textOrEmpty("reasoning_content").ifEmpty { delta.textOrEmpty("reasoning") }
+                    if (thought.isNotEmpty()) {
+                        reasoning.append(thought)
+                        onReasoning(thought)
+                    }
                     val text = delta.textOrEmpty("content")
                     if (text.isNotEmpty()) {
                         content.append(text)
@@ -243,6 +287,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         }
 
         if (!sawSse) return parseNonStream(raw.toString())
+        if (!done && finish == null) throw AiException("Поток ответа прерван до завершения")
 
         val calls = args.keys.sorted().map { idx ->
             AiToolCall(
@@ -252,7 +297,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                 googleThoughtSignature = signatures[idx]
             )
         }.filter { it.name.isNotBlank() }
-        return AiResponse(content.toString(), calls, finish)
+        return AiResponse(content.toString(), calls, finish, reasoning.toString(), usage = usage)
     }
 
     internal fun parseNonStream(raw: String): AiResponse {
@@ -278,7 +323,9 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                 )
             }
         }
-        return AiResponse(content, calls)
+        val reasoning = message.textOrEmpty("reasoning_content").ifEmpty { message.textOrEmpty("reasoning") }
+        return AiResponse(content, calls, reasoning = reasoning,
+            usage = UsageParser.openAi(obj.optJSONObject("usage"), ProviderRequestPolicy.isOpenRouter(provider.baseUrl)))
     }
 }
 
@@ -286,12 +333,14 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
 class AnthropicClient(private val provider: Provider) : AiClient {
 
     @Volatile private var currentCall: Call? = null
+    @Volatile private var cancelled = false
 
     override fun cancel() {
+        cancelled = true
         runCatching { currentCall?.cancel() }
     }
 
-    override suspend fun complete(req: AiRequest, onDelta: suspend (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
+    override suspend fun complete(req: AiRequest, onReasoning: suspend (String) -> Unit, onDelta: suspend (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
         val base = provider.baseUrl.trim().trimEnd('/').ifEmpty { "https://api.anthropic.com" }
         val url = if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
         val payload = buildPayload(req)
@@ -301,23 +350,17 @@ class AnthropicClient(private val provider: Provider) : AiClient {
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
         if (provider.apiKey.isNotBlank()) builder.header("x-api-key", provider.apiKey)
-        val call = sharedHttp.newCall(builder.build())
-        currentCall = call
-        try {
-            call.execute().use { resp ->
-                val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
-                if (!resp.isSuccessful) {
-                    val err = runCatching { body.string() }.getOrDefault("")
-                    throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
-                }
-                if (req.stream) {
-                    parseStream(body.source(), onDelta)
-                } else {
-                    parseAnthropicJson(body.string())
-                }
+        if (ModelReasoningCatalog.capability(provider, req.model)?.protocol == ReasoningProtocol.ANTHROPIC_MANUAL &&
+            req.reasoningLevel != ReasoningLevel.OFF && !req.model.contains("haiku", ignoreCase = true)) {
+            builder.header("anthropic-beta", "interleaved-thinking-2025-05-14")
+        }
+        RequestRetry.execute(builder.build(), onCall = { currentCall = it }, isCancelled = { cancelled }) { resp ->
+            val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
+            if (!resp.isSuccessful) {
+                val err = runCatching { resp.peekBody(8192).string() }.getOrDefault("")
+                throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
             }
-        } finally {
-            currentCall = null
+            if (req.stream) parseStream(body.source(), onReasoning, onDelta) else parseAnthropicJson(body.string())
         }
     }
 
@@ -328,12 +371,16 @@ class AnthropicClient(private val provider: Provider) : AiClient {
             throw AiException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка API")
         }
         val content = StringBuilder()
+        val reasoning = StringBuilder()
+        val blocks = mutableListOf<String>()
         val calls = mutableListOf<AiToolCall>()
         obj.optJSONArray("content")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val block = arr.optJSONObject(i) ?: continue
+                blocks.add(block.toString())
                 when (block.optString("type")) {
-                    "text" -> content.append(block.optString("text", ""))
+                    "text" -> content.append(block.textOrEmpty("text"))
+                    "thinking" -> reasoning.append(block.textOrEmpty("thinking"))
                     "tool_use" -> calls.add(
                         AiToolCall(
                             id = block.optString("id", "toolu_$i"),
@@ -344,15 +391,35 @@ class AnthropicClient(private val provider: Provider) : AiClient {
                 }
             }
         }
-        return AiResponse(content.toString(), calls, obj.optString("stop_reason"))
+        val usage = UsageParser.Anthropic().apply { update(obj.optJSONObject("usage")) }.result()
+        return AiResponse(content.toString(), calls, obj.optString("stop_reason"), reasoning.toString(), blocks, usage)
     }
 
-    private fun buildPayload(req: AiRequest): JSONObject {
+    internal fun buildPayload(req: AiRequest): JSONObject {
         val root = JSONObject()
         root.put("model", req.model)
         root.put("stream", req.stream)
         root.put("max_tokens", req.maxTokens)
-        root.put("temperature", req.temperature)
+        val protocol = ModelReasoningCatalog.capability(provider, req.model)?.protocol
+        val thinkingEnabled = req.reasoningLevel != ReasoningLevel.OFF &&
+            (protocol == ReasoningProtocol.ANTHROPIC_MANUAL || protocol == ReasoningProtocol.ANTHROPIC_ADAPTIVE)
+        when {
+            thinkingEnabled && protocol == ReasoningProtocol.ANTHROPIC_MANUAL -> {
+                val desired = when (req.reasoningLevel) {
+                    ReasoningLevel.LOW -> 1024
+                    ReasoningLevel.MEDIUM -> 2048
+                    else -> 4096
+                }
+                if (req.maxTokens <= 1024) throw AiException("Для рассуждения Anthropic max_tokens должен превышать 1024")
+                root.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", desired.coerceAtMost(req.maxTokens - 1)))
+            }
+            thinkingEnabled && protocol == ReasoningProtocol.ANTHROPIC_ADAPTIVE -> {
+                root.put("thinking", JSONObject().put("type", "adaptive"))
+                root.put("output_config", JSONObject().put("effort", req.reasoningLevel.name.lowercase()))
+            }
+            protocol == ReasoningProtocol.ANTHROPIC_ADAPTIVE -> root.put("thinking", JSONObject().put("type", "disabled"))
+        }
+        if (!thinkingEnabled) root.put("temperature", req.temperature)
         if (req.system.isNotBlank()) root.put("system", req.system)
 
         val messages = JSONArray()
@@ -373,6 +440,14 @@ class AnthropicClient(private val provider: Provider) : AiClient {
         for (m in req.messages) {
             when (m.role) {
                 "assistant" -> {
+                    val trace = m.anthropicTrace
+                    val replay = if (thinkingEnabled && trace != null && trace.providerId == provider.id &&
+                        trace.baseUrl.trimEnd('/') == provider.baseUrl.trimEnd('/') && trace.model == req.model
+                    ) runCatching { trace.blocks.map { JSONObject(it) } }.getOrNull() else null
+                    if (!replay.isNullOrEmpty()) {
+                        replay.forEach { addBlock("assistant", it) }
+                        continue
+                    }
                     if (m.content.isNotBlank()) addBlock("assistant", JSONObject().put("type", "text").put("text", m.content))
                     m.toolCalls.forEach { tc ->
                         val input = runCatching { JSONObject(tc.arguments.ifBlank { "{}" }) }.getOrDefault(JSONObject())
@@ -409,12 +484,18 @@ class AnthropicClient(private val provider: Provider) : AiClient {
         return root
     }
 
-    private suspend fun parseStream(source: BufferedSource, onDelta: suspend (String) -> Unit): AiResponse {
+    internal suspend fun parseStream(
+        source: BufferedSource,
+        onReasoning: suspend (String) -> Unit = {},
+        onDelta: suspend (String) -> Unit
+    ): AiResponse {
         val content = StringBuilder()
-        val toolJson = LinkedHashMap<Int, StringBuilder>()
-        val toolNames = HashMap<Int, String>()
-        val toolIds = HashMap<Int, String>()
+        val reasoning = StringBuilder()
+        val blocks = sortedMapOf<Int, JSONObject>()
+        val toolJson = mutableMapOf<Int, StringBuilder>()
+        val usage = UsageParser.Anthropic()
         var finish: String? = null
+        var done = false
 
         while (true) {
             val line = source.readUtf8Line() ?: break
@@ -424,53 +505,63 @@ class AnthropicClient(private val provider: Provider) : AiClient {
             val obj = runCatching { JSONObject(data) }.getOrNull() ?: continue
             when (obj.optString("type")) {
                 "error" -> throw AiException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка API")
+                "message_start" -> usage.update(obj.optJSONObject("message")?.optJSONObject("usage"))
                 "content_block_start" -> {
                     val idx = obj.optInt("index", 0)
                     val block = obj.optJSONObject("content_block") ?: continue
+                    blocks[idx] = JSONObject(block.toString())
                     when (block.optString("type")) {
-                        "tool_use" -> {
-                            toolIds[idx] = block.optString("id", "toolu_$idx")
-                            toolNames[idx] = block.optString("name", "")
-                            toolJson.getOrPut(idx) { StringBuilder() }
+                        "tool_use" -> toolJson[idx] = StringBuilder()
+                        "text" -> block.textOrEmpty("text").takeIf { it.isNotEmpty() }?.let {
+                            content.append(it); onDelta(it)
                         }
-                        "text" -> {
-                            val t = block.optString("text", "")
-                            if (t.isNotEmpty()) {
-                                content.append(t)
-                                onDelta(t)
-                            }
+                        "thinking" -> block.textOrEmpty("thinking").takeIf { it.isNotEmpty() }?.let {
+                            reasoning.append(it); onReasoning(it)
                         }
                     }
                 }
                 "content_block_delta" -> {
                     val idx = obj.optInt("index", 0)
                     val delta = obj.optJSONObject("delta") ?: continue
+                    val block = blocks[idx] ?: continue
                     when (delta.optString("type")) {
                         "text_delta" -> {
-                            val t = delta.optString("text", "")
-                            if (t.isNotEmpty()) {
-                                content.append(t)
-                                onDelta(t)
-                            }
+                            val text = delta.textOrEmpty("text")
+                            block.put("text", block.textOrEmpty("text") + text)
+                            if (text.isNotEmpty()) { content.append(text); onDelta(text) }
                         }
-                        "input_json_delta" -> {
-                            toolJson.getOrPut(idx) { StringBuilder() }
-                                .append(delta.optString("partial_json", ""))
+                        "thinking_delta" -> {
+                            val text = delta.textOrEmpty("thinking")
+                            block.put("thinking", block.textOrEmpty("thinking") + text)
+                            if (text.isNotEmpty()) { reasoning.append(text); onReasoning(text) }
                         }
+                        "signature_delta" -> block.put("signature", block.textOrEmpty("signature") + delta.textOrEmpty("signature"))
+                        "input_json_delta" -> toolJson.getOrPut(idx) { StringBuilder() }.append(delta.textOrEmpty("partial_json"))
+                    }
+                }
+                "content_block_stop" -> {
+                    val idx = obj.optInt("index", 0)
+                    val partial = toolJson[idx]?.toString().orEmpty()
+                    if (partial.isNotBlank()) {
+                        val input = runCatching { JSONObject(partial) }.getOrElse { throw AiException("Поток аргументов инструмента повреждён") }
+                        blocks[idx]?.put("input", input)
                     }
                 }
                 "message_delta" -> {
-                    finish = obj.optJSONObject("delta")?.optString("stop_reason")
+                    finish = obj.optJSONObject("delta")?.textOrEmpty("stop_reason")?.ifBlank { finish }
+                    usage.update(obj.optJSONObject("usage"))
                 }
+                "message_stop" -> { done = true; break }
             }
         }
-        val calls = toolJson.keys.sorted().map { idx ->
-            AiToolCall(
-                id = toolIds[idx] ?: "toolu_$idx",
-                name = toolNames[idx].orEmpty(),
-                arguments = toolJson[idx]?.toString().orEmpty().ifBlank { "{}" }
-            )
-        }.filter { it.name.isNotBlank() }
-        return AiResponse(content.toString(), calls, finish)
+        if (!done) throw AiException("Поток ответа прерван до завершения")
+        val calls = blocks.mapNotNull { (idx, block) ->
+            if (block.optString("type") != "tool_use") null else AiToolCall(
+                id = block.optString("id", "toolu_$idx"),
+                name = block.optString("name", ""),
+                arguments = block.optJSONObject("input")?.toString() ?: "{}"
+            ).takeIf { it.name.isNotBlank() }
+        }
+        return AiResponse(content.toString(), calls, finish, reasoning.toString(), blocks.values.map { it.toString() }, usage.result())
     }
 }

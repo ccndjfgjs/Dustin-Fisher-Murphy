@@ -15,11 +15,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -35,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,6 +47,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun TerminalScreen(vm: AppViewModel) {
     val ui = vm.ui
+    val clipboard = LocalClipboardManager.current
     var command by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
 
@@ -51,6 +57,12 @@ fun TerminalScreen(vm: AppViewModel) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         ScreenHeader(title = "Терминал", subtitle = ui.workspace) {
+            IconButton(
+                enabled = ui.terminalLog.isNotEmpty(),
+                onClick = { clipboard.setText(AnnotatedString(ui.terminalLog.joinToString("\n") { stripAnsi(it) })) }
+            ) {
+                Icon(Icons.Outlined.ContentCopy, "Скопировать вывод терминала", tint = Muted, modifier = Modifier.size(19.dp))
+            }
             IconBubble(Icons.Default.Delete, tint = Danger, onClick = { vm.clearTerminal() })
         }
 
@@ -73,13 +85,15 @@ fun TerminalScreen(vm: AppViewModel) {
                 modifier = Modifier.size(width = 44.dp, height = 26.dp)
             )
             Spacer(Modifier.weight(1f))
-            Text(
-                "cd ${ui.workspace}",
-                color = Muted,
-                fontSize = 10.sp,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1
-            )
+            SelectionContainer {
+                Text(
+                    "cd ${ui.workspace}",
+                    color = Muted,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1
+                )
+            }
         }
 
         Column(
@@ -88,7 +102,7 @@ fun TerminalScreen(vm: AppViewModel) {
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color0B0D12)
+                .background(DesignTokens.terminalBackground)
         ) {
             LazyColumn(
                 state = listState,
@@ -97,25 +111,29 @@ fun TerminalScreen(vm: AppViewModel) {
             ) {
                 if (ui.terminalLog.isEmpty()) {
                     item {
-                        Text(
-                            "Локальный shell на устройстве.\n\n" +
-                                "• с root: любые команды от uid=0 (su)\n" +
-                                "• без root: только права приложения\n\n" +
-                                "Примеры:\n  id\n  ls -la /sdcard\n  magisk -v\n  pm list packages | head",
-                            color = Muted,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
+                        SelectionContainer {
+                            Text(
+                                "Локальный shell на устройстве.\n\n" +
+                                    "• с root: любые команды от uid=0 (su)\n" +
+                                    "• без root: только права приложения\n\n" +
+                                    "Примеры:\n  id\n  ls -la /sdcard\n  magisk -v\n  pm list packages | head",
+                                color = Muted,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
                     }
                 }
                 items(ui.terminalLog.size) { index ->
                     val line = stripAnsi(ui.terminalLog[index])
-                    Text(
-                        line,
-                        color = if (line.startsWith("❯")) Accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
+                    SelectionContainer {
+                        Text(
+                            line,
+                            color = if (line.startsWith("❯")) Accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                 }
             }
         }
@@ -164,5 +182,3 @@ fun TerminalScreen(vm: AppViewModel) {
         }
     }
 }
-
-private val Color0B0D12 = androidx.compose.ui.graphics.Color(0xFF0B0D12)

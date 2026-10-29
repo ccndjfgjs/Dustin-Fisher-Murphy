@@ -13,7 +13,12 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.opencode.mobile.data.AppSettings
+import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.Role
+import dev.opencode.mobile.data.ToolCallRef
+import dev.opencode.mobile.ui.AssistantMessage
+import dev.opencode.mobile.ui.InlineApproval
 import dev.opencode.mobile.ui.MarkdownText
 import dev.opencode.mobile.ui.ModelPickerSheet
 import dev.opencode.mobile.ui.OpenCodeTheme
@@ -45,6 +50,27 @@ class ChatComponentsUiTest {
         rule.onNodeWithText("model-a").assertIsDisplayed()
         rule.onNodeWithText("model-a").performClick()
         rule.runOnIdle { assertEquals("model-a", settings.activeProvider.model) }
+    }
+
+    @Test fun authenticationErrorOffersSettingsAction() {
+        var opened = false
+        val message = ChatMessage(role = Role.ASSISTANT, content = "HTTP 401. Проверьте API-ключ в Настройках.", errorStatus = 401)
+        rule.setContent { OpenCodeTheme { AssistantMessage(message, onSettings = { opened = true }) } }
+        rule.onNodeWithText("Проверьте API-ключ в Настройках", substring = true).assertExists()
+        rule.onNodeWithText("Открыть настройки").performClick()
+        rule.runOnIdle { assertEquals(true, opened) }
+    }
+
+    @Test fun inlineApprovalShowsReplacementPreviewAndDecision() {
+        var decision: Boolean? = null
+        val call = ToolCallRef("1", "edit_file", """{"path":"a.txt","old_string":"before","new_string":"after"}""")
+        rule.setContent { OpenCodeTheme { InlineApproval(call, "path=a.txt", onDecision = { decision = it }) } }
+        rule.onNodeWithText("Разрешить инструмент?").assertExists()
+        rule.onNodeWithText("Предпросмотр замены (до выполнения)").assertExists()
+        rule.onNodeWithText("- before", substring = true).assertExists()
+        rule.onNodeWithText("+ after", substring = true).assertExists()
+        rule.onNodeWithText("Отклонить").performClick()
+        rule.runOnIdle { assertEquals(false, decision) }
     }
 
     @Test fun codeBlockHasWorkingCopyAction() {

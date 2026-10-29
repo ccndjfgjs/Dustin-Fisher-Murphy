@@ -13,16 +13,23 @@ internal object HistoryAdapter {
         while (index < history.size) {
             val message = history[index]
             when (message.role) {
-                Role.USER -> out.add(AiMessage(role = "user", content = message.content))
+                Role.USER -> out.add(AiMessage(role = "user", content = buildString {
+                    append(message.content)
+                    message.attachments.forEach { attachment ->
+                        append("\n\n[Снимок прикреплённого файла: ").append(attachment.path).append("]\n")
+                        append(attachment.content).append("\n[Конец файла]\n")
+                    }
+                }))
                 Role.ASSISTANT -> {
-                    if (message.toolCalls.isEmpty() && message.content.isBlank()) {
+                    if (message.errorStatus != null || (message.toolCalls.isEmpty() && message.content.isBlank())) {
                         index++
                         continue
                     }
                     out.add(AiMessage(
                         role = "assistant",
                         content = message.content,
-                        toolCalls = message.toolCalls.map { AiToolCall(it.id, it.name, it.arguments, it.googleThoughtSignature) }
+                        toolCalls = message.toolCalls.map { AiToolCall(it.id, it.name, it.arguments, it.googleThoughtSignature) },
+                        anthropicTrace = message.anthropicTrace
                     ))
                     if (message.toolCalls.isNotEmpty()) {
                         val results = mutableMapOf<String, ChatMessage>()

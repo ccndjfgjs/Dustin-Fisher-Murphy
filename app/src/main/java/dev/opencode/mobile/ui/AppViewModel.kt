@@ -1,6 +1,7 @@
 package dev.opencode.mobile.ui
 
 import android.app.Application
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -10,10 +11,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.opencode.mobile.OpenCodeApp
 import dev.opencode.mobile.agent.AgentEngine
+import dev.opencode.mobile.agent.ProjectContext
 import dev.opencode.mobile.data.AppSettings
+import dev.opencode.mobile.data.ChatExport
 import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.ChatSession
 import dev.opencode.mobile.data.FileEntry
+import dev.opencode.mobile.data.FileUndo
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
@@ -21,10 +25,12 @@ import dev.opencode.mobile.data.TodoItem
 import dev.opencode.mobile.data.ToolCallRef
 import dev.opencode.mobile.shell.RootStatus
 import dev.opencode.mobile.shell.Shell
+import dev.opencode.mobile.tools.FileUndoManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -42,9 +48,11 @@ data class UiState(
     val workspace: String = "/sdcard",
     val entries: List<FileEntry> = emptyList(),
     val sessions: List<SessionSummary> = emptyList(),
+    val sessionQuery: String = "",
     val session: ChatSession? = null,
     val chatDraft: String = "",
     val busy: Boolean = false,
+    val undoBusy: Boolean = false,
     val runningRootAllowed: Boolean = false,
     val runningAutoApprove: Boolean = false,
     val status: String = "",
@@ -75,9 +83,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var job: Job? = null
+    private var sessionSearchJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
     private var pendingOutput = StringBuilder()
     private var lastChunkFlush = 0L
+    private var reasoningStartNanos: Long? = null
+    private var reasoningLastNanos: Long? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var agentRunId = 0L
     // Drafts survive navigation and session changes while the app process remains alive.
@@ -200,10 +211,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- сессии ----------
 
-    fun refreshSessions() {
+    fun refreshSessions() = searchSessions(ui.sessionQuery, debounce = false)
+
+    fun searchSessions(query: String, debounce: Boolean = true) {
+        ui = ui.copy(sessionQuery = query)
+        sessionSearchJob?.cancel()
+        sessionSearchJob = viewModelScope.launch {
+            if (debounce) delay(200)
+            val list = withContext(Dispatchers.IO) { store.search(query) }
+            if (ui.sessionQuery == query) ui = ui.copy(sessions = list)
+        }
+    }
+
+    fun renameSession(id: String, title: String) {
+        if (sessionChangeBlocked()) return
+        val clean = title.replace(Regex("[\\r\\n\\p{Cntrl}]"), " ").trim().take(120)
+        if (clean.isBlank()) { ui = ui.copy(toast = "Название не может быть пустым"); return }
+        // Serialize with the existing main-thread session writes, so a rename cannot overwrite a new message.
+        val original = ui.session?.takeIf { it.id == id } ?: store.load(id)
+        if (original == null) { ui = ui.copy(toast = "Чат не найден"); return }
+        val renamed = original.copy(title = clean, titleManuallySet = true, updatedAt = System.currentTimeMillis())
+        if (!store.save(renamed)) { ui = ui.copy(toast = "Не удалось сохранить название"); return }
+        if (ui.session?.id == id) ui = ui.copy(session = renamed)
+        refreshSessions()
+    }
+
+    fun exportSession(id: String, uri: Uri) {
+        if (sessionChangeBlocked()) return
+        val current = ui.session?.takeIf { it.id == id }
         viewModelScope.launch {
-            val list = withContext(Dispatchers.IO) { store.list() }
-            ui = ui.copy(sessions = list)
+            val success = withContext(Dispatchers.IO) {
+                runCatching {
+                    val session = current ?: store.load(id) ?: error("Чат не найден")
+                    application.contentResolver.openOutputStream(uri, "wt")?.use { stream ->
+                        stream.write(ChatExport.markdown(session).toByteArray(Charsets.UTF_8))
+                    } ?: error("Не удалось открыть файл")
+                }.isSuccess
+            }
+            ui = ui.copy(toast = if (success) "Чат экспортирован" else "Не удалось экспортировать чат")
         }
     }
 
@@ -287,15 +332,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun sendMessage(raw: String) {
         val text = raw.trim()
         if (text.isEmpty() || ui.busy) return
-        var session = ui.session ?: ChatSession(cwd = ui.workspace)
-        if (session.messages.none { it.role == Role.USER }) {
-            session = session.copy(title = text.take(48).replace('\n', ' '))
-        }
-        val userMsg = ChatMessage(role = Role.USER, content = text)
-        session = session.copy(messages = session.messages + userMsg, updatedAt = System.currentTimeMillis())
-        setSession(session)
-        application.prefs.update { it.copy(lastSessionId = session.id) }
-
+        val cwd = ui.session?.cwd ?: ui.workspace
         val settings = application.prefs.settings.value
         val provider = settings.activeProvider
         val model = provider.model
@@ -305,13 +342,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             busy = true,
             runningRootAllowed = settings.allowRoot,
             runningAutoApprove = settings.autoApproveTools,
-            status = "Думаю…",
+            status = "Проверяю файлы…",
             screen = Screen.CHAT
         )
         val runId = ++agentRunId
 
         job = viewModelScope.launch {
             try {
+                val attachments = try {
+                    withContext(Dispatchers.IO) { ProjectContext.attachments(cwd, text) }
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (e: Exception) {
+                    ui = ui.copy(toast = e.message ?: "Не удалось прикрепить файл")
+                    return@launch
+                }
+                var session = ui.session ?: ChatSession(cwd = cwd)
+                if (!session.titleManuallySet && session.messages.none { it.role == Role.USER }) {
+                    session = session.copy(title = text.take(48).replace('\n', ' '))
+                }
+                val userMsg = ChatMessage(role = Role.USER, content = text, attachments = attachments)
+                session = session.copy(messages = session.messages + userMsg, updatedAt = System.currentTimeMillis())
+                setSession(session)
+                application.prefs.update { it.copy(lastSessionId = session.id) }
+                // Do not erase a draft the user changed while file snapshots were being read.
+                if (ui.chatDraft == raw) updateChatDraft("")
                 engine.run(
                     provider = provider,
                     model = model,
@@ -322,6 +377,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     maxIterations = settings.maxIterations,
                     systemAppend = settings.systemAppend,
                     streaming = settings.streaming,
+                    reasoningLevel = settings.reasoningLevel,
+                    planMode = settings.planMode,
+                    gitExecutable = settings.gitExecutable,
+                    mcpServers = settings.mcpServers,
                     listener = agentListener(runId, session.id)
                 )
             } catch (c: kotlinx.coroutines.CancellationException) {
@@ -330,7 +389,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 updateMessages { messages ->
                     messages.map { message ->
                         when {
-                            message.streaming -> message.copy(streaming = false, content = message.content.ifBlank { "Остановлено." })
+                            message.streaming -> message.copy(
+                                streaming = false,
+                                content = message.content.ifBlank { "Остановлено." },
+                                reasoningDurationMs = reasoningStartNanos?.let { start ->
+                                    ((reasoningLastNanos ?: System.nanoTime()) - start).coerceAtLeast(0) / 1_000_000
+                                }
+                            )
                             message.role == Role.TOOL && message.toolOk == null -> message.copy(
                                 toolOk = false,
                                 content = "Выполнение прервано. Проверьте состояние файлов перед повтором."
@@ -348,6 +413,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stop() {
         if (!ui.busy) return
+        if (ui.undoBusy) { ui = ui.copy(toast = "Дождитесь завершения отката"); return }
         engine.cancel()
         approvalDeferred?.complete(false)
         approvalDeferred = null
@@ -360,6 +426,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         approvalDeferred?.complete(allow)
         approvalDeferred = null
         ui = ui.copy(approval = null)
+    }
+
+    fun undoFileEdit(messageId: String) {
+        if (sessionChangeBlocked()) return
+        val session = ui.session ?: return
+        val record = session.messages.firstOrNull { it.id == messageId }?.fileUndo ?: return
+        if (record.undone) return
+        ui = ui.copy(busy = true, undoBusy = true, status = "Откатываю правку…")
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { FileUndoManager.undo(session.cwd, record) } }
+            if (result.isSuccess) {
+                updateMessages { list -> list.map { message ->
+                    if (message.id == messageId) message.copy(fileUndo = record.copy(undone = true),
+                        content = message.content + "\n[Пользователь отменил эту правку файла.]") else message
+                } }
+                ui.session?.let { if (!store.save(it)) ui = ui.copy(toast = "Правка отменена, но историю не удалось сохранить")
+                    else ui = ui.copy(toast = "Правка отменена") }
+                refreshEntries()
+            } else ui = ui.copy(toast = result.exceptionOrNull()?.message ?: "Не удалось отменить правку")
+            ui = ui.copy(busy = false, undoBusy = false, status = "")
+            refreshSessions()
+        }
     }
 
     fun toggleMessage(id: String) {
@@ -396,6 +484,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onAssistantStart() = dispatchAgentEvent(runId, sessionId) {
             pendingOutput = StringBuilder()
+            reasoningStartNanos = null
+            reasoningLastNanos = null
             appendMessage(ChatMessage(role = Role.ASSISTANT, content = "", streaming = true))
         }
 
@@ -404,6 +494,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val idx = list.indexOfLast { it.role == Role.ASSISTANT && it.streaming }
                 if (idx < 0) list else list.toMutableList().also {
                     it[idx] = it[idx].copy(content = it[idx].content + text)
+                }
+            }
+        }
+
+        override fun onAssistantReasoningDelta(text: String) = dispatchAgentEvent(runId, sessionId) {
+            val now = System.nanoTime()
+            if (reasoningStartNanos == null) reasoningStartNanos = now
+            reasoningLastNanos = now
+            updateMessages { list ->
+                val idx = list.indexOfLast { it.role == Role.ASSISTANT && it.streaming }
+                if (idx < 0) list else list.toMutableList().also {
+                    it[idx] = it[idx].copy(reasoning = it[idx].reasoning + text)
                 }
             }
         }
@@ -433,6 +535,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         override fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String) = dispatchAgentEvent(runId, sessionId) {
             updateToolMessage(call.id, ok, output.ifBlank { "(нет вывода)" })
             pendingOutput = StringBuilder()
+        }
+
+        override fun onToolUndoAvailable(call: ToolCallRef, undo: FileUndo) = dispatchAgentEvent(runId, sessionId) {
+            updateMessages { list -> list.map { message ->
+                if (message.role == Role.TOOL && message.toolCallId == call.id) message.copy(fileUndo = undo) else message
+            } }
+            ui.session?.let { if (!store.save(it)) ui = ui.copy(toast = "Не удалось сохранить снимок для отката") }
+        }
+
+        override fun onContextCompacted() = dispatchAgentEvent(runId, sessionId) {
+            ui = ui.copy(toast = "Длинная история сжата для запроса; оригинал сохранён")
+        }
+
+        override fun onMcpWarning(text: String) = dispatchAgentEvent(runId, sessionId) {
+            ui = ui.copy(toast = text)
         }
 
         override fun onTodo(items: List<TodoItem>) = dispatchAgentEvent(runId, sessionId) {
@@ -595,7 +712,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (argsJson.isNullOrBlank()) return ""
         return runCatching {
             val o = JSONObject(argsJson)
-            val interesting = listOf("path", "command", "url", "pattern", "from", "to", "cwd")
+            if (name == "git_commit" && o.has("_staged_preview")) {
+                return@runCatching "Сообщение: ${o.optString("message")}\nТолько индекс; без hooks и подписи.\n${o.optString("_staged_preview")}"
+            }
+            if (name.startsWith("mcp_") && o.has("_mcp_tool")) {
+                return@runCatching "Сервер: ${o.optString("_mcp_server")}\nИнструмент: ${o.optString("_mcp_tool")}\nАргументы:\n${o.optJSONObject("_mcp_args")?.toString(2) ?: "{}"}"
+            }
+            val interesting = listOf("path", "command", "url", "pattern", "from", "to", "cwd", "message", "staged")
             interesting.mapNotNull { key -> if (o.has(key)) "$key=${o.optString(key)}" else null }
                 .joinToString("  ")
                 .ifBlank { argsJson.take(120) }

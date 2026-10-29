@@ -20,7 +20,10 @@ data class Provider(
     val baseUrl: String,
     val apiKey: String = "",
     val model: String,
-    val extraModels: List<String> = emptyList()
+    val extraModels: List<String> = emptyList(),
+    val pricing: List<ModelPricing> = emptyList(),
+    // null means use only a small list of known endpoints; custom servers opt in explicitly.
+    val streamUsage: Boolean? = null
 ) {
     val models: List<String> get() = (listOf(model) + extraModels).distinct().filter { it.isNotBlank() }
 
@@ -39,6 +42,8 @@ data class Provider(
         .put("apiKey", apiKey)
         .put("model", model)
         .put("extraModels", JSONArray(extraModels))
+        .put("pricing", JSONArray().apply { pricing.forEach { put(it.toJson()) } })
+        .apply { streamUsage?.let { put("streamUsage", it) } }
 
     companion object {
         fun fromJson(o: JSONObject): Provider {
@@ -53,7 +58,11 @@ data class Provider(
                 baseUrl = o.optString("baseUrl", ""),
                 apiKey = o.optString("apiKey", ""),
                 model = o.optString("model", ""),
-                extraModels = extra
+                extraModels = extra,
+                pricing = o.optJSONArray("pricing")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { index -> arr.optJSONObject(index)?.let { ModelPricing.fromJson(it) } }
+                } ?: emptyList(),
+                streamUsage = if (o.has("streamUsage") && !o.isNull("streamUsage")) o.optBoolean("streamUsage") else null
             )
         }
 
@@ -101,10 +110,14 @@ data class AppSettings(
     val activeProviderId: String = providers.first().id,
     val allowRoot: Boolean = false,
     val autoApproveTools: Boolean = false,
+    val planMode: Boolean = false,
+    val gitExecutable: String = "git",
+    val mcpServers: List<McpServer> = emptyList(),
     val maxIterations: Int = 40,
     val systemAppend: String = "",
     val lastWorkspace: String = "/sdcard/OpenCode",
     val streaming: Boolean = true,
+    val reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
     val fontSize: Int = 13,
     val lastSessionId: String? = null
 ) {
@@ -129,10 +142,14 @@ data class AppSettings(
             .put("activeProviderId", activeProviderId)
             .put("allowRoot", allowRoot)
             .put("autoApproveTools", autoApproveTools)
+            .put("planMode", planMode)
+            .put("gitExecutable", gitExecutable)
+            .put("mcpServers", JSONArray().apply { mcpServers.forEach { put(it.toJson()) } })
             .put("maxIterations", maxIterations)
             .put("systemAppend", systemAppend)
             .put("lastWorkspace", lastWorkspace)
             .put("streaming", streaming)
+            .put("reasoningLevel", reasoningLevel.name)
             .put("fontSize", fontSize)
             .put("lastSessionId", lastSessionId ?: "")
     }
@@ -150,10 +167,16 @@ data class AppSettings(
                 activeProviderId = o.optString("activeProviderId", providers.first().id),
                 allowRoot = o.optBoolean("allowRoot", false),
                 autoApproveTools = o.optBoolean("autoApproveTools", false),
+                planMode = o.optBoolean("planMode", false),
+                gitExecutable = o.optString("gitExecutable", "git"),
+                mcpServers = o.optJSONArray("mcpServers")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { index -> arr.optJSONObject(index)?.let { McpServer.fromJson(it) } }
+                } ?: emptyList(),
                 maxIterations = o.optInt("maxIterations", 40),
                 systemAppend = o.optString("systemAppend", ""),
                 lastWorkspace = o.optString("lastWorkspace", "/sdcard/OpenCode"),
                 streaming = o.optBoolean("streaming", true),
+                reasoningLevel = ReasoningLevel.from(o.optString("reasoningLevel", "OFF")),
                 fontSize = o.optInt("fontSize", 13),
                 lastSessionId = lastSession.ifBlank { null }
             )

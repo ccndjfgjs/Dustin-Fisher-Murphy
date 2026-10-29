@@ -29,4 +29,10 @@ internal object ProviderRequestPolicy {
     }
 
     fun isGoogleGemini(baseUrl: String): Boolean = host(baseUrl) == "generativelanguage.googleapis.com"
+
+    fun isOpenAi(baseUrl: String): Boolean = host(baseUrl) == "api.openai.com"
+
+    fun isOpenRouter(baseUrl: String): Boolean = host(baseUrl) == "openrouter.ai"
+
+    fun defaultStreamUsage(baseUrl: String): Boolean = host(baseUrl) in setOf("api.openai.com", "openrouter.ai", "api.deepseek.com")
 }

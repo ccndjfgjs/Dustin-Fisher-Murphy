@@ -126,7 +126,8 @@ fun AppRoot(vm: AppViewModel) {
         }
     }
 
-    if (ui.approval != null) {
+    // The chat shows approvals inline; keep a dialog as a fallback on other screens.
+    if (ui.approval != null && ui.screen != Screen.CHAT) {
         val call = ui.approval.call
         AlertDialog(
             onDismissRequest = { vm.approve(false) },

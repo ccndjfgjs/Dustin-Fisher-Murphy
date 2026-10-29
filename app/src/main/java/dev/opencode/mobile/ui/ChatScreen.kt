@@ -1,6 +1,8 @@
 package dev.opencode.mobile.ui
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -8,6 +10,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -44,17 +47,22 @@ import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FileUpload
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -64,17 +72,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -86,29 +97,43 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.opencode.mobile.agent.ProjectContext
 import dev.opencode.mobile.data.ChatMessage
+import dev.opencode.mobile.data.ModelReasoningCatalog
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.ReasoningLevel
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
 import dev.opencode.mobile.data.TodoItem
+import dev.opencode.mobile.data.ToolCallRef
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
-
-private val ChatPanel = Color(0xFF1A1E28)
-private val ChatOutline = Color(0xFF303747)
+import java.util.Locale
 
 @Composable
 fun ChatScreen(vm: AppViewModel) {
     val ui = vm.ui
+    val focusManager = LocalFocusManager.current
     val session = ui.session
     // Empty assistant tool-call envelopes are represented by the tool cards themselves.
     val messages = session?.messages.orEmpty().filterNot {
-        it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.toolCalls.isNotEmpty()
+        it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.reasoning.isBlank() && it.toolCalls.isNotEmpty() && it.usage == null
     }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var showSessions by remember { mutableStateOf(false) }
+    var showFiles by remember { mutableStateOf(false) }
+    var exportId by rememberSaveable { mutableStateOf<String?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
+        val id = exportId
+        exportId = null
+        if (uri != null && id != null) vm.exportSession(id, uri)
+    }
     var showModels by remember { mutableStateOf(false) }
     var followLatest by remember(session?.id) { mutableStateOf(true) }
     var autoScrolling by remember(session?.id) { mutableStateOf(false) }
@@ -171,10 +196,18 @@ fun ChatScreen(vm: AppViewModel) {
                     val last = info.visibleItemsInfo.lastOrNull()
                     val overflow = if (last != null) last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding) else 0
                     if (last == null || last.index < messages.lastIndex || overflow > 0) {
+                        // layoutInfo can be published while Compose is measuring. Wait for the next
+                        // frame before scrolling, then re-read the layout rather than using stale bounds.
+                        withFrameNanos { }
+                        val current = listState.layoutInfo
+                        if (current.totalItemsCount != messages.size) return@collect
+                        val currentLast = current.visibleItemsInfo.lastOrNull()
+                        val currentOverflow = if (currentLast != null)
+                            currentLast.offset + currentLast.size - (current.viewportEndOffset - current.afterContentPadding) else 0
                         autoScrolling = true
                         try {
-                            if (last == null || last.index < messages.lastIndex) listState.scrollToItem(messages.lastIndex)
-                            else listState.scrollBy(overflow.toFloat())
+                            if (currentLast == null || currentLast.index < messages.lastIndex) listState.scrollToItem(messages.lastIndex)
+                            else if (currentOverflow > 0) listState.scrollBy(currentOverflow.toFloat())
                         } finally {
                             autoScrolling = false
                         }
@@ -237,7 +270,10 @@ fun ChatScreen(vm: AppViewModel) {
             }
         }
 
-        if (ui.busy && ui.status.isNotBlank()) {
+        ui.approval?.call?.let { call ->
+            InlineApproval(call, vm.currentToolCallArgs(call.name, call.arguments), vm::approve)
+        }
+        if (ui.busy && ui.status.isNotBlank() && ui.approval == null) {
             Row(
                 modifier = Modifier.padding(start = 22.dp, end = 16.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -253,12 +289,16 @@ fun ChatScreen(vm: AppViewModel) {
             onValueChange = vm::updateChatDraft,
             provider = ui.settings.activeProvider,
             busy = ui.busy,
-            onModelClick = { showModels = true },
+            reasoningLevel = ui.settings.reasoningLevel,
+            onReasoningLevelChange = { level -> vm.saveSettings { it.copy(reasoningLevel = level) } },
+            planMode = ui.settings.planMode,
+            onPlanModeChange = { plan -> vm.saveSettings { it.copy(planMode = plan) } },
+            onModelClick = { focusManager.clearFocus(); showModels = true },
+            onAttach = { focusManager.clearFocus(); showFiles = true },
             onSend = {
                 if (ui.chatDraft.isNotBlank() && !ui.busy) {
                     followLatest = true
                     vm.sendMessage(ui.chatDraft)
-                    vm.updateChatDraft("")
                 }
             },
             onStop = vm::stop
@@ -280,15 +320,31 @@ fun ChatScreen(vm: AppViewModel) {
             }
         )
     }
+    if (showFiles) {
+        FileMentionSheet(
+            cwd = session?.cwd ?: ui.workspace,
+            onDismiss = { showFiles = false },
+            onPick = { path ->
+                val current = vm.ui.chatDraft
+                val separator = if (current.isEmpty() || current.last().isWhitespace()) "" else " "
+                vm.updateChatDraft(current + separator + "@" + JSONObject.quote(path) + " ")
+                showFiles = false
+            }
+        )
+    }
     if (showSessions) {
         SessionsSheet(
             sessions = ui.sessions,
+            query = ui.sessionQuery,
             activeId = session?.id,
             busy = ui.busy,
             formatTime = vm::formatTime,
+            onQuery = { vm.searchSessions(it) },
             onDismiss = { showSessions = false },
             onNew = { vm.newSession(); showSessions = false },
             onOpen = { vm.openSession(it); showSessions = false },
+            onRename = vm::renameSession,
+            onExport = { id -> exportId = id; exportLauncher.launch("chat-${id.take(8)}.md") },
             onDelete = vm::deleteSession
         )
     }
@@ -338,7 +394,7 @@ private fun EmptyChat(showSuggestions: Boolean, onPrompt: (String) -> Unit) {
     ) {
         Box(
             Modifier.size(58.dp).clip(RoundedCornerShape(19.dp)).background(
-                Brush.linearGradient(listOf(Color(0xFF7097FF), Color(0xFF8B78DE)))
+                Accent
             ),
             contentAlignment = Alignment.Center
         ) {
@@ -358,7 +414,7 @@ private fun EmptyChat(showSuggestions: Boolean, onPrompt: (String) -> Unit) {
         if (showSuggestions) suggestions.forEach { (label, prompt, icon) ->
             Row(
                 modifier = Modifier.fillMaxWidth().widthIn(max = 360.dp).padding(vertical = 3.dp)
-                    .clip(RoundedCornerShape(13.dp)).border(1.dp, ChatOutline, RoundedCornerShape(13.dp))
+                    .clip(RoundedCornerShape(13.dp)).border(1.dp, DesignTokens.outline, RoundedCornerShape(13.dp))
                     .clickable { onPrompt(prompt) }.padding(horizontal = 14.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -420,23 +476,27 @@ private fun TodoStrip(todos: List<TodoItem>) {
 @Composable
 private fun MessageItem(message: ChatMessage, vm: AppViewModel, onExpandTool: () -> Unit) {
     when (message.role) {
-        Role.USER -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            SelectionContainer {
-                Text(
-                    message.content,
-                    modifier = Modifier.widthIn(max = 340.dp).clip(RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp))
-                        .background(Color(0xFF273653)).padding(horizontal = 15.dp, vertical = 11.dp),
-                    fontSize = 14.sp, lineHeight = 21.sp, color = Color(0xFFF1F4FF)
-                )
+        Role.USER -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Box(Modifier.width(2.dp).height(36.dp).background(Accent.copy(alpha = 0.65f)))
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Вы", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                SelectionContainer {
+                    Text(message.content, fontSize = 14.sp, lineHeight = 21.sp, color = DesignTokens.textHigh)
+                }
+                if (message.attachments.isNotEmpty()) {
+                    Text("Прикреплено: " + message.attachments.joinToString { it.path },
+                        color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                }
             }
         }
-        Role.ASSISTANT -> AssistantMessage(message)
+        Role.ASSISTANT -> AssistantMessage(message, onSettings = { vm.navigate(Screen.SETTINGS) })
         Role.TOOL -> ToolCard(message, vm, onExpandTool)
     }
 }
 
 @Composable
-private fun AssistantMessage(message: ChatMessage) {
+internal fun AssistantMessage(message: ChatMessage, onSettings: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     Column(Modifier.fillMaxWidth()) {
@@ -457,6 +517,10 @@ private fun AssistantMessage(message: ChatMessage) {
             }
         }
         Spacer(Modifier.height(8.dp))
+        if (message.reasoning.isNotBlank()) {
+            ReasoningCard(message)
+            Spacer(Modifier.height(8.dp))
+        }
         if (message.content.isBlank() && message.streaming) {
             Text("Готовлю ответ…", color = Muted, fontSize = 13.sp)
         } else if (message.content.isNotBlank()) {
@@ -465,6 +529,105 @@ private fun AssistantMessage(message: ChatMessage) {
             Text("Запускаю инструменты…", color = Muted, fontSize = 12.sp)
         } else {
             Text("Модель не вернула текст.", color = Muted, fontSize = 12.sp)
+        }
+        if (!message.streaming && message.errorStatus == null) {
+            val usage = message.usage
+            val tokens = if (usage == null) "Токены: нет данных" else
+                "Токены: вход ${usage.inputTokens?.toString() ?: "—"}, выход ${usage.outputTokens?.toString() ?: "—"}" +
+                    (if (usage.cachedInputTokens > 0) " · кэш ${usage.cachedInputTokens}" else "")
+            val cost = usage?.costUsd?.let {
+                val amount = if (it > 0 && it < 0.000001) "< $0.000001" else String.format(Locale.US, "$%.6f", it)
+                if (usage.estimated) "оценка $amount" else "по API $amount"
+            } ?: "нет данных"
+            Text("$tokens · Стоимость: $cost", color = Muted, fontSize = 10.sp,
+                modifier = Modifier.padding(top = 8.dp).testTag("response-usage"))
+        }
+        if (message.errorStatus == 401) {
+            TextButton(onClick = onSettings) { Text("Открыть настройки") }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningCard(message: ChatMessage) {
+    var expanded by remember(message.id) { mutableStateOf(message.streaming) }
+    LaunchedEffect(message.streaming) { expanded = message.streaming }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val duration = message.reasoningDurationMs?.let { if (it < 1000) "< 1 с" else "${it / 1000} с" }
+    Column(Modifier.fillMaxWidth().border(1.dp, DesignTokens.outline, RoundedCornerShape(10.dp)).testTag("reasoning-card")) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.weight(1f).clickable { expanded = !expanded }.padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Рассуждение" + when { message.streaming -> " · выполняется"; duration != null -> " · $duration"; else -> "" },
+                    color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Medium
+                )
+            }
+            IconButton(onClick = {
+                clipboard.setText(AnnotatedString(message.reasoning))
+                Toast.makeText(context, "Рассуждение скопировано", Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Outlined.ContentCopy, "Скопировать рассуждение", tint = Muted, modifier = Modifier.size(16.dp))
+            }
+        }
+        if (expanded) {
+            SelectionContainer {
+                Text(message.reasoning, modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+            }
+        }
+    }
+}
+
+// A preview of requested replacement arguments, not a claim that the edit succeeded.
+private fun replacementPreview(name: String?, args: String?): String? {
+    if (name != "edit_file" || args.isNullOrBlank()) return null
+    return runCatching {
+        val json = JSONObject(args)
+        val old = json.optString("old_string", "")
+        val new = json.optString("new_string", "")
+        if (old.isEmpty() && new.isEmpty()) null else {
+            fun lines(value: String, prefix: String) = value.take(1000).lines().take(12).joinToString("\n") { "$prefix $it" }
+            listOf(lines(old, "-"), lines(new, "+")).joinToString("\n") +
+                if (old.length > 1000 || new.length > 1000 || old.lines().size > 12 || new.lines().size > 12) "\n…" else ""
+        }
+    }.getOrNull()
+}
+
+@Composable
+internal fun InlineApproval(call: ToolCallRef, summary: String, onDecision: (Boolean) -> Unit) {
+    val preview = remember(call.arguments, call.name) { replacementPreview(call.name, call.arguments) }
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp)).background(SurfaceColor)
+            .border(1.dp, Accent.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+            .padding(start = 12.dp, end = 8.dp, top = 8.dp).testTag("inline-approval")
+    ) {
+        Text(when {
+            call.name == "git_commit" -> "Создать коммит из подготовленных изменений?"
+            call.name.startsWith("mcp_") -> "Разрешить вызов MCP-сервера?"
+            else -> "Разрешить инструмент?"
+        }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Column(Modifier.heightIn(max = 110.dp).verticalScroll(rememberScrollState())) {
+            SelectionContainer {
+                Column {
+                    Text(call.name, color = DesignTokens.textHigh, fontSize = 11.sp, fontFamily = Mono)
+                    if (summary.isNotBlank()) Text(summary, color = Muted, fontSize = 10.sp, fontFamily = Mono)
+                    if (preview != null) {
+                        Text("Предпросмотр замены (до выполнения)", color = Muted, fontSize = 10.sp)
+                        Text(preview, color = DesignTokens.textHigh, fontSize = 10.sp, lineHeight = 14.sp, fontFamily = Mono)
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { onDecision(false) }) { Text("Отклонить") }
+            TextButton(onClick = { onDecision(true) }) { Text("Разрешить") }
         }
     }
 }
@@ -475,7 +638,7 @@ private fun ToolCard(message: ChatMessage, vm: AppViewModel, onExpand: () -> Uni
     val args = vm.currentToolCallArgs(message.toolName.orEmpty(), message.toolArgs)
     Column(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SurfaceColor)
-            .border(1.dp, ChatOutline.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+            .border(1.dp, DesignTokens.outline.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable(onClick = onExpand)
@@ -498,12 +661,24 @@ private fun ToolCard(message: ChatMessage, vm: AppViewModel, onExpand: () -> Uni
             Spacer(Modifier.width(4.dp))
             Icon(if (message.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (message.expanded) "Свернуть результат" else "Развернуть результат", tint = Muted, modifier = Modifier.size(20.dp))
         }
+        message.fileUndo?.let { undo ->
+            if (undo.undone) {
+                Text("Правка отменена", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(start = 12.dp, bottom = 8.dp))
+            } else {
+                TextButton(onClick = { vm.undoFileEdit(message.id) }, enabled = !vm.ui.busy,
+                    modifier = Modifier.padding(start = 6.dp).testTag("undo-file-edit")) { Text("Откатить правку", fontSize = 11.sp) }
+            }
+        }
         if (message.expanded) {
-            Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
-                Text(message.toolName.orEmpty(), color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                if (args.isNotBlank()) Text(args, color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
-                if (message.content.isNotBlank()) {
-                    SelectionContainer {
+            SelectionContainer {
+                Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
+                    Text(message.toolName.orEmpty(), color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    if (args.isNotBlank()) Text(args, color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
+                    replacementPreview(message.toolName, message.toolArgs)?.let { preview ->
+                        Text("Запрошенная замена", color = Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
+                        Text(preview, color = DesignTokens.textHigh, fontSize = 10.sp, lineHeight = 14.sp, fontFamily = Mono)
+                    }
+                    if (message.content.isNotBlank()) {
                         Text(
                             message.content, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 11.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace,
@@ -528,7 +703,9 @@ private fun toolTitle(name: String?): String = when (name) {
     "web_fetch" -> "Загрузка страницы"
     "todo_write" -> "План задачи"
     "device_info" -> "Информация об устройстве"
-    else -> name ?: "Инструмент"
+    "git_diff" -> "Git diff"
+    "git_commit" -> "Git коммит"
+    else -> if (name?.startsWith("mcp_") == true) "MCP-инструмент" else name ?: "Инструмент"
 }
 
 @Composable
@@ -539,12 +716,17 @@ internal fun ChatComposer(
     busy: Boolean,
     onModelClick: () -> Unit,
     onSend: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
+    onReasoningLevelChange: (ReasoningLevel) -> Unit = {},
+    onAttach: () -> Unit = {},
+    planMode: Boolean = false,
+    onPlanModeChange: (Boolean) -> Unit = {}
 ) {
     Column(Modifier.fillMaxWidth().imePadding().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(ChatPanel)
-                .border(1.dp, ChatOutline, RoundedCornerShape(22.dp)).padding(start = 14.dp, end = 8.dp, top = 14.dp, bottom = 8.dp)
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(DesignTokens.chatPanel)
+                .border(1.dp, DesignTokens.outline, RoundedCornerShape(22.dp)).padding(start = 14.dp, end = 8.dp, top = 14.dp, bottom = 8.dp)
         ) {
             BasicTextField(
                 value = value,
@@ -561,38 +743,84 @@ internal fun ChatComposer(
                     }
                 }
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                var modeMenu by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { modeMenu = true }, enabled = !busy, modifier = Modifier.testTag("chat-mode")) {
+                        Text(if (planMode) "Режим: План" else "Режим: Агент", fontSize = 11.sp)
+                    }
+                    DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
+                        DropdownMenuItem(text = { Text("План · только чтение") }, onClick = { onPlanModeChange(true); modeMenu = false })
+                        DropdownMenuItem(text = { Text("Агент · разрешены действия") }, onClick = { onPlanModeChange(false); modeMenu = false })
+                    }
+                }
+                if (planMode) Text("Без изменений и команд", color = Muted, fontSize = 10.sp, maxLines = 1)
+            }
+            val capability = ModelReasoningCatalog.capability(provider)
+            if (capability != null) {
+                var menuOpen by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { menuOpen = true }, enabled = !busy) {
+                        Text("Рассуждение: ${reasoningLevel.label}", fontSize = 11.sp)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        ReasoningLevel.entries.forEach { level ->
+                            DropdownMenuItem(text = { Text(level.label) }, onClick = {
+                                onReasoningLevelChange(level)
+                                menuOpen = false
+                            })
+                        }
+                    }
+                }
+                if (ModelReasoningCatalog.toolsRestricted(provider, provider.model, reasoningLevel)) {
+                    Text("DeepSeek: инструменты отключены, пока включено рассуждение.", color = Muted, fontSize = 10.sp)
+                } else if (capability.alwaysOn && reasoningLevel == ReasoningLevel.OFF) {
+                    Text("Модель рассуждает всегда; используется уровень по умолчанию.", color = Muted, fontSize = 10.sp)
+                }
+            }
             Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            BoxWithConstraints(Modifier.fillMaxWidth().testTag("chat-composer-actions")) {
+                val maxChipWidth = (maxWidth - 92.dp).coerceAtLeast(0.dp)
                 Row(
-                    modifier = Modifier.weight(1f, fill = false).heightIn(min = 42.dp)
-                        .clip(RoundedCornerShape(12.dp)).background(SurfaceHigh)
-                        .clickable(onClick = onModelClick)
-                        .semantics { contentDescription = "Выбрать модель" }
-                        .testTag("chat-model-picker").padding(start = 11.dp, end = 7.dp, top = 5.dp, bottom = 5.dp),
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f, fill = false)) {
-                        Text(provider.model.ifBlank { "Выберите модель" }, color = Color(0xFFE5EBFF), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (busy) "${provider.name} · следующий запрос" else provider.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(
+                        modifier = Modifier.widthIn(max = maxChipWidth).heightIn(min = 40.dp)
+                            .clip(RoundedCornerShape(12.dp)).background(SurfaceHigh)
+                            .clickable(onClick = onModelClick)
+                            .semantics { contentDescription = "Выбрать модель" }
+                            .testTag("chat-model-picker").padding(start = 11.dp, end = 7.dp, top = 5.dp, bottom = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f, fill = false)) {
+                            Text(provider.model.ifBlank { "Выберите модель" }, color = DesignTokens.textHigh, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (busy) "${provider.name} · следующий запрос" else provider.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Icon(Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(18.dp))
                     }
-                    Icon(Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(18.dp))
-                }
-                Spacer(Modifier.weight(1f))
-                val enabled = busy || value.isNotBlank()
-                IconButton(
-                    onClick = { if (busy) onStop() else onSend() },
-                    enabled = enabled,
-                    modifier = Modifier.size(46.dp).background(
-                        if (busy) Danger.copy(alpha = 0.2f) else if (enabled) Accent else Color(0xFF303745),
-                        RoundedCornerShape(15.dp)
-                    )
-                ) {
-                    Icon(
-                        if (busy) Icons.Default.Stop else Icons.Default.ArrowUpward,
-                        if (busy) "Остановить ответ" else "Отправить сообщение",
-                        tint = if (busy) Danger else if (enabled) Color(0xFF101629) else Muted,
-                        modifier = Modifier.size(21.dp)
-                    )
+                    IconButton(onClick = onAttach, enabled = !busy,
+                        modifier = Modifier.size(40.dp).semantics { contentDescription = "Прикрепить файл" }) {
+                        Text("@", color = if (busy) Muted else Accent, fontSize = 20.sp)
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    val enabled = busy || value.isNotBlank()
+                    Box(
+                        modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp))
+                            .background(if (busy) Danger.copy(alpha = 0.2f) else if (enabled) Accent else DesignTokens.disabledControl)
+                            .clickable(enabled = enabled, role = SemanticsRole.Button) { if (busy) onStop() else onSend() }
+                            .semantics { contentDescription = if (busy) "Остановить ответ" else "Отправить сообщение" }
+                            .testTag("chat-send"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            if (busy) Icons.Default.Stop else Icons.Default.ArrowUpward,
+                            contentDescription = null,
+                            tint = if (busy) Danger else if (enabled) DesignTokens.onAccent else Muted,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
         }
@@ -601,27 +829,66 @@ internal fun ChatComposer(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SessionsSheet(
+internal fun FileMentionSheet(cwd: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    var paths by remember(cwd) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(cwd, query) {
+        delay(150)
+        paths = withContext(Dispatchers.IO) { runCatching { ProjectContext.findFiles(cwd, query) }.getOrDefault(emptyList()) }
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = DesignTokens.chatPanel) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
+            Text("Упомянуть файл", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Text("Текст выбранных файлов и AGENTS.md из корня проекта отправляются провайдеру. До 5 файлов, по 64 КБ.",
+                color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+            OutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true,
+                label = { Text("Поиск файла в проекте") }, modifier = Modifier.fillMaxWidth().testTag("mention-search"))
+            if (paths.isEmpty()) Text("Файлы не найдены", color = Muted, modifier = Modifier.padding(vertical = 24.dp))
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp), contentPadding = PaddingValues(bottom = 18.dp)) {
+                items(paths, key = { it }) { path ->
+                    Text(path, modifier = Modifier.fillMaxWidth().clickable { onPick(path) }.padding(vertical = 12.dp),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SessionsSheet(
     sessions: List<SessionSummary>,
+    query: String,
     activeId: String?,
     busy: Boolean,
     formatTime: (Long) -> String,
+    onQuery: (String) -> Unit,
     onDismiss: () -> Unit,
     onNew: () -> Unit,
     onOpen: (String) -> Unit,
+    onRename: (String, String) -> Unit,
+    onExport: (String) -> Unit,
     onDelete: (String) -> Unit
 ) {
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
-    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = ChatPanel) {
+    var pendingRename by remember { mutableStateOf<SessionSummary?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var pendingExport by remember { mutableStateOf<SessionSummary?>(null) }
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = DesignTokens.chatPanel) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
             Text("История чатов", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text(if (busy) "Сначала остановите текущую задачу" else "Ваши диалоги на этом устройстве", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
+            OutlinedTextField(
+                value = query, onValueChange = onQuery, singleLine = true,
+                label = { Text("Поиск по истории") },
+                modifier = Modifier.fillMaxWidth().testTag("session-search")
+            )
             TextButton(onClick = onNew, enabled = !busy) {
                 Icon(Icons.Default.Add, null, Modifier.size(18.dp))
                 Text("  Новый чат")
             }
             if (sessions.isEmpty()) {
-                Text("Пока нет сохранённых чатов", color = Muted, modifier = Modifier.padding(vertical = 24.dp))
+                Text(if (query.isBlank()) "Пока нет сохранённых чатов" else "Ничего не найдено", color = Muted, modifier = Modifier.padding(vertical = 24.dp))
             } else {
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 400.dp), contentPadding = PaddingValues(bottom = 18.dp)) {
                     items(sessions, key = { it.id }) { session ->
@@ -635,6 +902,12 @@ private fun SessionsSheet(
                                 Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                                 Text(formatTime(session.updatedAt), color = Muted, fontSize = 11.sp)
                             }
+                            IconButton(onClick = { pendingRename = session; renameText = session.title }, enabled = !busy) {
+                                Icon(Icons.Outlined.Edit, "Переименовать чат ${session.title}", modifier = Modifier.size(20.dp))
+                            }
+                            IconButton(onClick = { pendingExport = session }, enabled = !busy) {
+                                Icon(Icons.Outlined.FileUpload, "Экспортировать чат ${session.title}", modifier = Modifier.size(20.dp))
+                            }
                             IconButton(onClick = { pendingDelete = session }, enabled = !busy) {
                                 Icon(Icons.Outlined.DeleteOutline, "Удалить чат ${session.title}", tint = if (busy) Muted else Danger, modifier = Modifier.size(20.dp))
                             }
@@ -643,6 +916,27 @@ private fun SessionsSheet(
                 }
             }
         }
+    }
+    pendingRename?.let { session ->
+        AlertDialog(
+            onDismissRequest = { pendingRename = null },
+            title = { Text("Переименовать чат") },
+            text = {
+                OutlinedTextField(value = renameText, onValueChange = { renameText = it.take(120) }, singleLine = true,
+                    label = { Text("Название") }, modifier = Modifier.testTag("session-rename"))
+            },
+            confirmButton = { TextButton(onClick = { onRename(session.id, renameText); pendingRename = null }, enabled = renameText.isNotBlank()) { Text("Сохранить") } },
+            dismissButton = { TextButton(onClick = { pendingRename = null }) { Text("Отмена") } }
+        )
+    }
+    pendingExport?.let { session ->
+        AlertDialog(
+            onDismissRequest = { pendingExport = null },
+            title = { Text("Экспортировать чат?") },
+            text = { Text("Markdown-файл содержит сообщения, рассуждения и результаты инструментов. В них могут быть секреты. Выберите безопасное место для сохранения.") },
+            confirmButton = { TextButton(onClick = { onExport(session.id); pendingExport = null }) { Text("Выбрать файл") } },
+            dismissButton = { TextButton(onClick = { pendingExport = null }) { Text("Отмена") } }
+        )
     }
     pendingDelete?.let { session ->
         AlertDialog(
