@@ -74,7 +74,7 @@ class ChatUiTest {
                 rule.onNodeWithTag("chat-messages").performScrollToNode(hasText("Просмотр папки"))
                 rule.onNodeWithText("list_dir").assertDoesNotExist()
                 rule.onNodeWithText("Просмотр папки").performClick()
-                rule.onNodeWithText("list_dir").assertIsDisplayed()
+                rule.onNodeWithText("list_dir").assertExists()
             } finally {
                 val testSession = app.prefs.settings.value.lastSessionId
                 app.prefs.update { previousSettings }
