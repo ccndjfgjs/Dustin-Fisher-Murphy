@@ -38,7 +38,8 @@ data class ToolOutcome(
     val ok: Boolean,
     val output: String,
     val title: String,
-    val filesTouched: List<String> = emptyList()
+    val filesTouched: List<String> = emptyList(),
+    val fileUndo: dev.opencode.mobile.data.FileUndo? = null
 )
 
 data class ToolContext(
@@ -236,7 +237,11 @@ object Tools {
         }
         // Even a caller accidentally supplying root cannot elevate a plan-mode read.
         val effective = if (ctx.planMode) ctx.copy(useRoot = false, sandboxed = true) else ctx
-        try {
+        val directEdit = name == "write_file" || name == "edit_file"
+        val before = if (directEdit) runCatching {
+            FileUndoManager.prepare(effective.cwd, args.optString("path"), effective.useRoot)
+        }.getOrNull() else null
+        val outcome = try {
             when (name) {
                 "read_file" -> readFile(args, effective)
                 "write_file" -> writeFile(args, effective)
@@ -257,6 +262,13 @@ object Tools {
         } catch (t: Exception) {
             ToolOutcome(false, "Ошибка инструмента $name: ${t.message ?: t.javaClass.simpleName}", "Ошибка")
         }
+        if (!directEdit) return@withContext outcome
+        val undo = before?.let { runCatching { FileUndoManager.finish(effective.cwd, it) }.getOrNull() }
+        if (undo != null && (outcome.ok || !undo.existedBefore || undo.beforeHash != undo.afterHash)) {
+            outcome.copy(fileUndo = undo)
+        } else if (outcome.ok || before == null) {
+            outcome.copy(output = outcome.output + "\nОткат этой правки недоступен (root, симлинк, путь вне проекта, размер или права).")
+        } else outcome
     }
 
     private fun isAllowed(file: File, ctx: ToolContext): Boolean {

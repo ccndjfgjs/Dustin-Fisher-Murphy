@@ -69,6 +69,7 @@ data class ChatMessage(
     val reasoningDurationMs: Long? = null,
     val anthropicTrace: AnthropicTrace? = null,
     val usage: TokenUsage? = null,
+    val fileUndo: FileUndo? = null,
     val toolCalls: List<ToolCallRef> = emptyList(),
     val toolCallId: String? = null,
     val toolName: String? = null,
@@ -90,6 +91,7 @@ data class ChatMessage(
         reasoningDurationMs?.let { o.put("reasoningDurationMs", it) }
         anthropicTrace?.let { o.put("anthropicTrace", it.toJson()) }
         usage?.let { o.put("usage", it.toJson()) }
+        fileUndo?.let { o.put("fileUndo", it.toJson()) }
         o.put("ts", ts)
         o.put("expanded", expanded)
         if (toolCalls.isNotEmpty()) {
@@ -122,6 +124,7 @@ data class ChatMessage(
                 reasoningDurationMs = if (!o.isNull("reasoningDurationMs")) o.optLong("reasoningDurationMs") else null,
                 anthropicTrace = o.optJSONObject("anthropicTrace")?.let { AnthropicTrace.fromJson(it) },
                 usage = o.optJSONObject("usage")?.let { TokenUsage.fromJson(it) },
+                fileUndo = o.optJSONObject("fileUndo")?.let { FileUndo.fromJson(it) },
                 toolCalls = calls,
                 toolCallId = if (o.has("toolCallId")) o.optString("toolCallId") else null,
                 toolName = if (o.has("toolName")) o.optString("toolName") else null,

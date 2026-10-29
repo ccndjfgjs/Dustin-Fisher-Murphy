@@ -7,6 +7,7 @@ import dev.opencode.mobile.ai.AiMessage
 import dev.opencode.mobile.ai.AiRequest
 import dev.opencode.mobile.data.AnthropicTrace
 import dev.opencode.mobile.data.ChatMessage
+import dev.opencode.mobile.data.FileUndo
 import dev.opencode.mobile.data.ModelReasoningCatalog
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.ReasoningLevel
@@ -33,6 +34,7 @@ class AgentEngine {
         fun onAssistantDone(message: ChatMessage)
         fun onToolStart(call: ToolCallRef)
         fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String)
+        fun onToolUndoAvailable(call: ToolCallRef, undo: FileUndo) = Unit
         fun onTodo(items: List<TodoItem>)
         fun onCommandOutputChunk(chunk: String)
         suspend fun approve(call: ToolCallRef): Boolean
@@ -179,6 +181,7 @@ class AgentEngine {
                     )
                     val outcome = Tools.execute(call.name, args, ctx)
                     listener.onToolEnd(callRef, outcome.ok, outcome.output)
+                    outcome.fileUndo?.let { listener.onToolUndoAvailable(callRef, it) }
                     messages.add(
                         AiMessage(
                             role = "tool",

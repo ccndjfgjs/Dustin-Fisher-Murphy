@@ -648,6 +648,14 @@ private fun ToolCard(message: ChatMessage, vm: AppViewModel, onExpand: () -> Uni
             Spacer(Modifier.width(4.dp))
             Icon(if (message.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (message.expanded) "Свернуть результат" else "Развернуть результат", tint = Muted, modifier = Modifier.size(20.dp))
         }
+        message.fileUndo?.let { undo ->
+            if (undo.undone) {
+                Text("Правка отменена", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(start = 12.dp, bottom = 8.dp))
+            } else {
+                TextButton(onClick = { vm.undoFileEdit(message.id) }, enabled = !vm.ui.busy,
+                    modifier = Modifier.padding(start = 6.dp).testTag("undo-file-edit")) { Text("Откатить правку", fontSize = 11.sp) }
+            }
+        }
         if (message.expanded) {
             SelectionContainer {
                 Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {

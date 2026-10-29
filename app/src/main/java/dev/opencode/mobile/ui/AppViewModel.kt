@@ -17,6 +17,7 @@ import dev.opencode.mobile.data.ChatExport
 import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.ChatSession
 import dev.opencode.mobile.data.FileEntry
+import dev.opencode.mobile.data.FileUndo
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
@@ -24,6 +25,7 @@ import dev.opencode.mobile.data.TodoItem
 import dev.opencode.mobile.data.ToolCallRef
 import dev.opencode.mobile.shell.RootStatus
 import dev.opencode.mobile.shell.Shell
+import dev.opencode.mobile.tools.FileUndoManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -50,6 +52,7 @@ data class UiState(
     val session: ChatSession? = null,
     val chatDraft: String = "",
     val busy: Boolean = false,
+    val undoBusy: Boolean = false,
     val runningRootAllowed: Boolean = false,
     val runningAutoApprove: Boolean = false,
     val status: String = "",
@@ -408,6 +411,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stop() {
         if (!ui.busy) return
+        if (ui.undoBusy) { ui = ui.copy(toast = "Дождитесь завершения отката"); return }
         engine.cancel()
         approvalDeferred?.complete(false)
         approvalDeferred = null
@@ -420,6 +424,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         approvalDeferred?.complete(allow)
         approvalDeferred = null
         ui = ui.copy(approval = null)
+    }
+
+    fun undoFileEdit(messageId: String) {
+        if (sessionChangeBlocked()) return
+        val session = ui.session ?: return
+        val record = session.messages.firstOrNull { it.id == messageId }?.fileUndo ?: return
+        if (record.undone) return
+        ui = ui.copy(busy = true, undoBusy = true, status = "Откатываю правку…")
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { FileUndoManager.undo(session.cwd, record) } }
+            if (result.isSuccess) {
+                updateMessages { list -> list.map { message ->
+                    if (message.id == messageId) message.copy(fileUndo = record.copy(undone = true),
+                        content = message.content + "\n[Пользователь отменил эту правку файла.]") else message
+                } }
+                ui.session?.let { if (!store.save(it)) ui = ui.copy(toast = "Правка отменена, но историю не удалось сохранить")
+                    else ui = ui.copy(toast = "Правка отменена") }
+                refreshEntries()
+            } else ui = ui.copy(toast = result.exceptionOrNull()?.message ?: "Не удалось отменить правку")
+            ui = ui.copy(busy = false, undoBusy = false, status = "")
+            refreshSessions()
+        }
     }
 
     fun toggleMessage(id: String) {
@@ -507,6 +533,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         override fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String) = dispatchAgentEvent(runId, sessionId) {
             updateToolMessage(call.id, ok, output.ifBlank { "(нет вывода)" })
             pendingOutput = StringBuilder()
+        }
+
+        override fun onToolUndoAvailable(call: ToolCallRef, undo: FileUndo) = dispatchAgentEvent(runId, sessionId) {
+            updateMessages { list -> list.map { message ->
+                if (message.role == Role.TOOL && message.toolCallId == call.id) message.copy(fileUndo = undo) else message
+            } }
+            ui.session?.let { if (!store.save(it)) ui = ui.copy(toast = "Не удалось сохранить снимок для отката") }
         }
 
         override fun onTodo(items: List<TodoItem>) = dispatchAgentEvent(runId, sessionId) {
