@@ -35,6 +35,7 @@ class AgentEngine {
         fun onToolStart(call: ToolCallRef)
         fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String)
         fun onToolUndoAvailable(call: ToolCallRef, undo: FileUndo) = Unit
+        fun onContextCompacted() = Unit
         fun onTodo(items: List<TodoItem>)
         fun onCommandOutputChunk(chunk: String)
         suspend fun approve(call: ToolCallRef): Boolean
@@ -75,12 +76,19 @@ class AgentEngine {
                 (if (restrictedTools) "\nИнструменты в этом запросе отключены. Не утверждай, что ты их вызвал." else "") +
                 (if (planMode) "\nРежим плана: только изучай проект и предлагай план. Нельзя изменять файлы, запускать команды или обращаться к внешним инструментам. Для выполнения пользователь должен переключиться в режим агента." else "")
             val messages = mutableListOf<AiMessage>()
-            val adapted = HistoryAdapter.toAiMessages(trimHistory(history))
+            val adapted = HistoryAdapter.toAiMessages(history)
             messages.addAll(if (restrictedTools) adapted.filter { it.role != "tool" }
                 .map { it.copy(toolCalls = emptyList()) }
                 .filter { it.role != "assistant" || it.content.isNotBlank() } else adapted)
             var iterations = maxIterations.coerceIn(1, 100)
+            var reportedCompaction = false
             while (iterations-- > 0) {
+                val compacted = HistoryCompactor.compact(messages)
+                if (compacted.compacted) {
+                    messages.clear()
+                    messages.addAll(compacted.messages)
+                    if (!reportedCompaction) { listener.onContextCompacted(); reportedCompaction = true }
+                }
                 listener.onStatus("Думаю…")
                 listener.onAssistantStart()
                 pendingReasoning = StringBuilder()
@@ -225,13 +233,6 @@ class AgentEngine {
 
     private fun clamp(text: String, limit: Int): String =
         if (text.length <= limit) text else text.take(limit) + "\n… [вывод обрезан, ${text.length - limit} символов]"
-
-    private fun trimHistory(history: List<ChatMessage>): List<ChatMessage> {
-        if (history.size <= 40) return history
-        var start = history.size - 40
-        while (start < history.size && history[start].role != Role.USER) start++
-        return if (start >= history.size) history.takeLast(40) else history.subList(start, history.size).toList()
-    }
 
     private fun buildSystemPrompt(cwd: String, useRoot: Boolean, append: String): String {
         val rootStatus = if (useRoot) Shell.rootStatus() else dev.opencode.mobile.shell.RootStatus(false)

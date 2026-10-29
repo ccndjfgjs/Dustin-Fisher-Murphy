@@ -542,6 +542,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             ui.session?.let { if (!store.save(it)) ui = ui.copy(toast = "Не удалось сохранить снимок для отката") }
         }
 
+        override fun onContextCompacted() = dispatchAgentEvent(runId, sessionId) {
+            ui = ui.copy(toast = "Длинная история сжата для запроса; оригинал сохранён")
+        }
+
         override fun onTodo(items: List<TodoItem>) = dispatchAgentEvent(runId, sessionId) {
             ui = ui.copy(todos = items)
         }

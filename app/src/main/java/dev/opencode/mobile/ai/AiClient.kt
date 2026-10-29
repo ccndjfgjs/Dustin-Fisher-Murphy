@@ -32,7 +32,9 @@ data class AiMessage(
     val toolCalls: List<AiToolCall> = emptyList(),
     val toolCallId: String? = null,
     val toolName: String? = null,
-    val anthropicTrace: AnthropicTrace? = null
+    val anthropicTrace: AnthropicTrace? = null,
+    // Local bookkeeping; never serialized as a vendor-specific message field.
+    val syntheticSummary: Boolean = false
 )
 
 data class AiRequest(
@@ -93,15 +95,18 @@ internal val sharedHttp: OkHttpClient = OkHttpClient.Builder()
     .connectTimeout(30, TimeUnit.SECONDS)
     .readTimeout(0, TimeUnit.MILLISECONDS)
     .writeTimeout(60, TimeUnit.SECONDS)
-    .retryOnConnectionFailure(true)
+    // Retries are managed explicitly so a partially received stream is never replayed.
+    .retryOnConnectionFailure(false)
     .build()
 
 /** Клиент для OpenAI Chat Completions и всех совместимых API (OpenRouter, Groq, Ollama, LM Studio, vLLM). */
 class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
 
     @Volatile private var currentCall: Call? = null
+    @Volatile private var cancelled = false
 
     override fun cancel() {
+        cancelled = true
         runCatching { currentCall?.cancel() }
     }
 
@@ -116,19 +121,13 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
             builder.header("HTTP-Referer", "https://github.com/ccndjfgjs/Dustin-Fisher-Murphy")
             builder.header("X-Title", "OpenCode Mobile")
         }
-        val call = sharedHttp.newCall(builder.build())
-        currentCall = call
-        try {
-            call.execute().use { resp ->
-                val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
-                if (!resp.isSuccessful) {
-                    val err = runCatching { body.string() }.getOrDefault("")
-                    throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
-                }
-                parseStream(body.source(), onReasoning, onDelta)
+        RequestRetry.execute(builder.build(), onCall = { currentCall = it }, isCancelled = { cancelled }) { resp ->
+            val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
+            if (!resp.isSuccessful) {
+                val err = runCatching { resp.peekBody(8192).string() }.getOrDefault("")
+                throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
             }
-        } finally {
-            currentCall = null
+            parseStream(body.source(), onReasoning, onDelta)
         }
     }
 
@@ -334,8 +333,10 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
 class AnthropicClient(private val provider: Provider) : AiClient {
 
     @Volatile private var currentCall: Call? = null
+    @Volatile private var cancelled = false
 
     override fun cancel() {
+        cancelled = true
         runCatching { currentCall?.cancel() }
     }
 
@@ -353,23 +354,13 @@ class AnthropicClient(private val provider: Provider) : AiClient {
             req.reasoningLevel != ReasoningLevel.OFF && !req.model.contains("haiku", ignoreCase = true)) {
             builder.header("anthropic-beta", "interleaved-thinking-2025-05-14")
         }
-        val call = sharedHttp.newCall(builder.build())
-        currentCall = call
-        try {
-            call.execute().use { resp ->
-                val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
-                if (!resp.isSuccessful) {
-                    val err = runCatching { body.string() }.getOrDefault("")
-                    throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
-                }
-                if (req.stream) {
-                    parseStream(body.source(), onReasoning, onDelta)
-                } else {
-                    parseAnthropicJson(body.string())
-                }
+        RequestRetry.execute(builder.build(), onCall = { currentCall = it }, isCancelled = { cancelled }) { resp ->
+            val body = resp.body ?: throw AiException("Пустой ответ сервера", resp.code)
+            if (!resp.isSuccessful) {
+                val err = runCatching { resp.peekBody(8192).string() }.getOrDefault("")
+                throw AiException("HTTP ${resp.code}: ${err.take(800)}", resp.code)
             }
-        } finally {
-            currentCall = null
+            if (req.stream) parseStream(body.source(), onReasoning, onDelta) else parseAnthropicJson(body.string())
         }
     }
 
