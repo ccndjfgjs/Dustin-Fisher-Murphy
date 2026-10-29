@@ -12,5 +12,9 @@ captures/
 *.aab
 *.keystore
 *.jks
+*.p12
+*.pfx
+*.key
+*.pem
 !gradle-wrapper.jar
 node_modules/

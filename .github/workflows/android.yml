@@ -7,81 +7,210 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Build debug APK
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests, lint and debug APK
         id: build
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          chmod +x ./gradlew
-          ./gradlew :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee build.log
-
-      - name: Publish failure log (issue)
-        if: >-
-          steps.build.outcome == 'failure' &&
-          (github.event_name == 'workflow_dispatch' ||
-           contains(github.event.head_commit.message, '[ci-log]'))
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace --no-daemon 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Annotate failures
+        if: steps.build.outcome == 'failure'
         shell: bash
         run: |
-          {
-            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo
-            echo '```'
-            grep -nE "(^e: |error:|FAILURE:|What went wrong|Caused by:|Execution failed|> Task .*FAILED)" -A 4 build.log | tail -n 800 || true
-            echo '```'
-          } > body.md
-          gh issue create --title "CI failure log #$GITHUB_RUN_ID" --body-file body.md
-
-      - name: Upload APK
+          python3 - "$RUNNER_TEMP/build.log" <<'PY'
+          import re, sys
+          lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+          matches = [line for line in lines if re.search(r'(^e: |^error:|^FAILURE:|^\* What went wrong|^> Task .*FAILED|^Caused by:|Execution failed for task)', line)]
+          for line in matches[-30:]:
+              print('::error::' + line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')[:1200])
+          PY
+      - name: Report debug signing certificate
+        if: steps.build.outcome == 'success'
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk | tee debug-signing.txt
+          sha256sum app/build/outputs/apk/debug/app-debug.apk > debug-sha256.txt
+      - name: Upload debug APK
         if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: opencode-mobile-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            debug-signing.txt
+            debug-sha256.txt
           if-no-files-found: error
-
+      - name: Upload test and lint reports on failure
+        if: steps.build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-reports
+          path: |
+            ${{ runner.temp }}/build.log
+            app/build/reports/
+          if-no-files-found: warn
       - name: Fail if build failed
         if: steps.build.outcome == 'failure'
         run: exit 1
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  signing-smoke:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Require a signing configuration
+        run: |
+          if env -u RELEASE_STORE_FILE -u RELEASE_STORE_PASSWORD -u RELEASE_KEY_ALIAS -u RELEASE_KEY_PASSWORD ./gradlew :app:requireReleaseSigning --no-daemon; then
+            echo '::error::A release must not be built without signing credentials.'
+            exit 1
+          fi
+      - name: Verify APK and AAB signing with a disposable CI-only key
+        env:
+          RELEASE_STORE_FILE: ${{ runner.temp }}/ci-test.jks
+          RELEASE_STORE_PASSWORD: ci-only-password
+          RELEASE_KEY_ALIAS: ci-test
+          RELEASE_KEY_PASSWORD: ci-only-password
+        run: |
+          set -euo pipefail
+          trap 'rm -f "$RELEASE_STORE_FILE"' EXIT
+          keytool -genkeypair -keystore "$RELEASE_STORE_FILE" -storetype JKS \
+            -storepass:env RELEASE_STORE_PASSWORD -keypass:env RELEASE_KEY_PASSWORD \
+            -alias "$RELEASE_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 2 \
+            -dname 'CN=CI test only, O=OpenCode Mobile, C=US' -noprompt
+          ./gradlew :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+          jarsigner -verify app/build/outputs/bundle/release/app-release.aab
+
+  emulator:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [24, 35]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Enable hardware virtualization
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install and test on Android ${{ matrix.api-level }}
+        id: emulator
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          # android-emulator-runner executes this under /bin/sh, so explicitly invoke bash.
+          script: >-
+            bash -o pipefail -c './gradlew :app:connectedDebugAndroidTest --stacktrace --no-daemon 2>&1 | tee "$RUNNER_TEMP/emulator-test.log"'
+      - name: Annotate test failures
+        if: steps.emulator.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/emulator-test.log" ]; then
+            python3 - "$RUNNER_TEMP/emulator-test.log" <<'PY'
+          import re, sys
+          lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+          matches = [line for line in lines if re.search(r'(^e: |^error:|^FAILURE:|^\* What went wrong|^> Task .*FAILED|^Caused by:|Execution failed for task|FAILED|Exception)', line)]
+          for line in matches[-30:]:
+              print('::error::' + line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')[:1200])
+          PY
+          else
+            echo '::error::The emulator did not start. See the emulator action log.'
+          fi
+      - name: Upload emulator results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-results-api-${{ matrix.api-level }}
+          path: |
+            ${{ runner.temp }}/emulator-test.log
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+          if-no-files-found: warn
+      - name: Fail if emulator tests failed
+        if: steps.emulator.outcome == 'failure'
+        run: exit 1
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, emulator, signing-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
         with:
-          name: opencode-mobile-debug
-          path: apk
-
-      - name: Publish GitHub Release
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and verify signed APK and AAB
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_FILE: ${{ runner.temp }}/release.keystore
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$KEYSTORE_BASE64" || -z "$RELEASE_STORE_PASSWORD" || -z "$RELEASE_KEY_ALIAS" || -z "$RELEASE_KEY_PASSWORD" ]]; then
+            echo '::error::Release signing secrets are missing. See docs/RELEASE.md; no unsigned release will be published.'
+            exit 1
+          fi
+          umask 077
+          trap 'rm -f "$RELEASE_STORE_FILE"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RELEASE_STORE_FILE"
+          ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon
+          mkdir -p release
+          cp app/build/outputs/apk/release/app-release.apk release/opencode-mobile-release.apk
+          cp app/build/outputs/bundle/release/app-release.aab release/opencode-mobile-release.aab
+          actual_version=$("$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging release/opencode-mobile-release.apk | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)
+          if [[ "$actual_version" != "${GITHUB_REF_NAME#v}" ]]; then
+            echo "::error::Tag version does not match app versionName ($actual_version)."
+            exit 1
+          fi
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs release/opencode-mobile-release.apk | tee release/CERTIFICATE.txt
+          jarsigner -verify release/opencode-mobile-release.aab
+          (cd release && sha256sum opencode-mobile-release.apk opencode-mobile-release.aab > SHA256SUMS.txt)
+      - name: Publish signed release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" apk/app-debug.apk \
+          gh release create "$GITHUB_REF_NAME" release/opencode-mobile-release.apk release/opencode-mobile-release.aab release/CERTIFICATE.txt release/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "OpenCode Mobile $GITHUB_REF_NAME" \
-            --notes "Debug APK. Установка: adb install -r app-debug.apk"
+            --notes "Подписанные APK и AAB. Информация о сертификате и контрольные суммы приложены отдельно."

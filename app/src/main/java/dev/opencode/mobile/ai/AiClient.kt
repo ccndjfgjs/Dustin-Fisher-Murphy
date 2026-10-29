@@ -43,14 +43,17 @@ data class AiResponse(
 class AiException(message: String, val status: Int = 0) : Exception(message)
 
 interface AiClient {
-    suspend fun complete(req: AiRequest, onDelta: (String) -> Unit): AiResponse
+    suspend fun complete(req: AiRequest, onDelta: suspend (String) -> Unit): AiResponse
     fun cancel()
 }
 
 object AiClients {
-    fun create(provider: Provider): AiClient = when (provider.kind) {
-        "anthropic" -> AnthropicClient(provider)
-        else -> OpenAiCompatibleClient(provider)
+    fun create(provider: Provider): AiClient {
+        ProviderUrlPolicy.error(provider.baseUrl, provider.apiKey)?.let { throw AiException(it) }
+        return when (provider.kind) {
+            "anthropic" -> AnthropicClient(provider)
+            else -> OpenAiCompatibleClient(provider)
+        }
     }
 
     fun endpoint(baseUrl: String, path: String): String {
@@ -80,7 +83,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         runCatching { currentCall?.cancel() }
     }
 
-    override suspend fun complete(req: AiRequest, onDelta: (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
+    override suspend fun complete(req: AiRequest, onDelta: suspend (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
         val payload = buildPayload(req)
         val builder = Request.Builder()
             .url(AiClients.endpoint(provider.baseUrl, "chat/completions"))
@@ -159,7 +162,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         return root
     }
 
-    private fun parseStream(source: BufferedSource, onDelta: (String) -> Unit): AiResponse {
+    private suspend fun parseStream(source: BufferedSource, onDelta: suspend (String) -> Unit): AiResponse {
         val content = StringBuilder()
         val args = LinkedHashMap<Int, StringBuilder>()
         val names = HashMap<Int, String>()
@@ -259,7 +262,7 @@ class AnthropicClient(private val provider: Provider) : AiClient {
         runCatching { currentCall?.cancel() }
     }
 
-    override suspend fun complete(req: AiRequest, onDelta: (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
+    override suspend fun complete(req: AiRequest, onDelta: suspend (String) -> Unit): AiResponse = withContext(Dispatchers.IO) {
         val base = provider.baseUrl.trim().trimEnd('/').ifEmpty { "https://api.anthropic.com" }
         val url = if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
         val payload = buildPayload(req)
@@ -377,7 +380,7 @@ class AnthropicClient(private val provider: Provider) : AiClient {
         return root
     }
 
-    private fun parseStream(source: BufferedSource, onDelta: (String) -> Unit): AiResponse {
+    private suspend fun parseStream(source: BufferedSource, onDelta: suspend (String) -> Unit): AiResponse {
         val content = StringBuilder()
         val toolJson = LinkedHashMap<Int, StringBuilder>()
         val toolNames = HashMap<Int, String>()

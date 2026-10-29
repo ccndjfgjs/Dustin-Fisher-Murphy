@@ -4,10 +4,12 @@ import dev.opencode.mobile.shell.Shell
 import dev.opencode.mobile.shell.ShellResult
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okio.Buffer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
@@ -217,7 +219,8 @@ object Tools {
         )
     )
 
-    val readOnly: Set<String> = setOf("read_file", "list_dir", "glob", "grep", "web_fetch", "device_info")
+    // Network requests can transmit URL parameters, so web_fetch requires approval.
+    val readOnly: Set<String> = setOf("read_file", "list_dir", "glob", "grep", "device_info")
 
     fun resolve(cwd: String, path: String): File {
         val p = File(path)
@@ -241,19 +244,31 @@ object Tools {
                 "device_info" -> deviceInfo(ctx)
                 else -> ToolOutcome(false, "Неизвестный инструмент: $name", "Ошибка")
             }
-        } catch (t: Throwable) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (t: Exception) {
             ToolOutcome(false, "Ошибка инструмента $name: ${t.message ?: t.javaClass.simpleName}", "Ошибка")
         }
     }
 
+    private fun isAllowed(file: File, ctx: ToolContext): Boolean {
+        if (!ctx.sandboxed) return true
+        return runCatching {
+            val path = file.canonicalPath
+            listOf(ctx.cwd, "/sdcard", "/storage/emulated/0", "/data/local/tmp")
+                .map { File(it).canonicalPath }
+                .any { root -> path == root || path.startsWith(root.trimEnd('/') + "/") }
+        }.getOrDefault(false)
+    }
+
     private fun guard(file: File, ctx: ToolContext) {
-        if (!ctx.sandboxed) return
-        val path = file.canonicalPath
-        val allowed = listOf(ctx.cwd, "/sdcard", "/storage/emulated/0", "/data/local/tmp")
-        if (allowed.none { path == it || path.startsWith(it.trimEnd('/') + "/") }) {
+        if (!isAllowed(file, ctx)) {
             throw IllegalStateException("В режиме без root доступ ограничен рабочей папкой и /sdcard")
         }
     }
+
+    // Never follow symlinks while walking: they can escape the allowed directory or form cycles.
+    private fun canVisit(file: File, ctx: ToolContext): Boolean = !Shell.isSymlink(file) && isAllowed(file, ctx)
 
     private fun numbered(content: String, offset: Int, limit: Int): String {
         val lines = content.split('\n')
@@ -274,7 +289,7 @@ object Tools {
         guard(file, ctx)
         val offset = args.optInt("offset", 1).coerceAtLeast(1)
         val limit = args.optInt("limit", 400).coerceIn(1, 2000)
-        val text = Shell.readText(file.absolutePath)
+        val text = Shell.readText(file.absolutePath, allowRoot = ctx.useRoot)
             ?: return ToolOutcome(false, "Не удалось прочитать ${file.absolutePath} (нет файла или прав)", "Чтение не удалось")
         return ToolOutcome(
             true,
@@ -288,7 +303,7 @@ object Tools {
         guard(file, ctx)
         val content = args.optString("content", "")
         file.parentFile?.mkdirs()
-        val ok = Shell.writeText(file.absolutePath, content)
+        val ok = Shell.writeText(file.absolutePath, content, allowRoot = ctx.useRoot)
         return if (ok) {
             ToolOutcome(true, "Записано ${content.length} символов в ${file.absolutePath}", "Изменён ${file.name}")
         } else {
@@ -302,7 +317,7 @@ object Tools {
         val oldStr = args.getString("old_string")
         val newStr = args.optString("new_string", "")
         val replaceAll = args.optBoolean("replace_all", false)
-        val current = Shell.readText(file.absolutePath)
+        val current = Shell.readText(file.absolutePath, allowRoot = ctx.useRoot)
             ?: return ToolOutcome(false, "Не удалось прочитать ${file.absolutePath}", "Ошибка")
         val count = countOccurrences(current, oldStr)
         if (count == 0) {
@@ -316,7 +331,7 @@ object Tools {
             )
         }
         val updated = if (replaceAll) current.replace(oldStr, newStr) else current.replaceFirst(oldStr, newStr)
-        val ok = Shell.writeText(file.absolutePath, updated)
+        val ok = Shell.writeText(file.absolutePath, updated, allowRoot = ctx.useRoot)
         return if (ok) {
             ToolOutcome(true, "Заменено вхождений: ${if (replaceAll) count else 1} в ${file.absolutePath}", "Изменён ${file.name}")
         } else {
@@ -345,7 +360,7 @@ object Tools {
         val sb = StringBuilder()
         fun walk(f: File, level: Int, prefix: String) {
             val children = f.listFiles()?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })) ?: return
-            children.take(200).forEach { child ->
+            children.take(200).filter { canVisit(it, ctx) }.forEach { child ->
                 val mark = if (child.isDirectory) "/" else ""
                 val size = if (child.isDirectory) "" else "  ${humanSize(child.length())}"
                 sb.append(prefix).append(child.name).append(mark).append(size).append('\n')
@@ -396,10 +411,10 @@ object Tools {
         val regex = globToRegex(pattern)
         val results = mutableListOf<String>()
         base.walkTopDown()
-            .onEnter { it.name !in ignoredDirs || it == base }
+            .onEnter { canVisit(it, ctx) && (it.name !in ignoredDirs || it == base) }
             .forEach { f ->
                 if (results.size >= 300) return@forEach
-                if (f.isFile && regex.matches(f.relativeToOrSelf(base).path.replace('\\', '/'))) {
+                if (canVisit(f, ctx) && f.isFile && regex.matches(f.relativeToOrSelf(base).path.replace('\\', '/'))) {
                     results.add(f.absolutePath)
                 }
             }
@@ -422,10 +437,9 @@ object Tools {
         val includeRegex = if (include.isBlank()) null else globToRegex(include)
         val out = StringBuilder()
         var found = 0
-        val files = if (base.isFile) listOf(base) else base.walkTopDown()
-            .onEnter { it.name !in ignoredDirs || it == base }
-            .filter { it.isFile && it.length() < 2_000_000 }
-            .toList()
+        val files = if (base.isFile) sequenceOf(base) else base.walkTopDown()
+            .onEnter { canVisit(it, ctx) && (it.name !in ignoredDirs || it == base) }
+            .filter { canVisit(it, ctx) && it.isFile && it.length() < 2_000_000 }
         var stop = false
         for (f in files) {
             if (stop) break
@@ -449,10 +463,12 @@ object Tools {
 
     private suspend fun runCommand(args: JSONObject, ctx: ToolContext): ToolOutcome {
         val command = args.getString("command")
-        val cwd = args.optString("cwd").ifBlank { ctx.cwd }
+        val cwd = resolve(ctx.cwd, args.optString("cwd").ifBlank { "." })
+        guard(cwd, ctx)
+        if (!cwd.isDirectory) return ToolOutcome(false, "Папка не найдена: $cwd", "Ошибка")
         val timeout = args.optInt("timeout", 120).coerceIn(5, 1800)
         val result: ShellResult = runInterruptible(Dispatchers.IO) {
-            Shell.run(command, cwd = cwd, useRoot = ctx.useRoot, timeoutSec = timeout, onChunk = ctx.onChunk)
+            Shell.run(command, cwd = cwd.absolutePath, useRoot = ctx.useRoot, timeoutSec = timeout, onChunk = ctx.onChunk)
         }
         val header = buildString {
             append("$ ").append(command).append('\n')
@@ -472,8 +488,8 @@ object Tools {
     private fun deletePath(args: JSONObject, ctx: ToolContext): ToolOutcome {
         val file = resolve(ctx.cwd, args.getString("path"))
         guard(file, ctx)
-        if (!file.exists() && !Shell.rootAvailable()) return ToolOutcome(false, "Не существует: ${file.absolutePath}", "Ошибка")
-        val ok = Shell.delete(file.absolutePath, args.optBoolean("recursive", true))
+        if (!file.exists() && !(ctx.useRoot && Shell.rootAvailable())) return ToolOutcome(false, "Не существует: ${file.absolutePath}", "Ошибка")
+        val ok = Shell.delete(file.absolutePath, args.optBoolean("recursive", true), allowRoot = ctx.useRoot)
         return ToolOutcome(ok, if (ok) "Удалено: ${file.absolutePath}" else "Не удалось удалить ${file.absolutePath}", if (ok) "Удалено" else "Ошибка")
     }
 
@@ -484,7 +500,8 @@ object Tools {
         guard(to, ctx)
         val ok = runCatching {
             to.parentFile?.mkdirs()
-            from.renameTo(to) || (from.copyRecursively(to, overwrite = true).let { from.deleteRecursively() })
+            // Do not delete the source after a potentially partial cross-volume copy.
+            from.renameTo(to)
         }.getOrDefault(false)
         return ToolOutcome(ok, if (ok) "Перемещено: $from -> $to" else "Не удалось переместить $from", if (ok) "Перемещено" else "Ошибка")
     }
@@ -507,10 +524,21 @@ object Tools {
         val max = args.optInt("max_chars", 20000).coerceIn(1000, 100000)
         val request = Request.Builder().url(url).header("User-Agent", "OpenCodeMobile/0.1").build()
         http.newCall(request).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) return ToolOutcome(false, "HTTP ${resp.code}: ${body.take(500)}", "Ошибка HTTP")
-            val text = stripHtml(body)
-            val trimmed = if (text.length > max) text.take(max) + "\n… (обрезано)" else text
+            if (!resp.isSuccessful) {
+                val error = resp.peekBody(4096).string().take(500)
+                return ToolOutcome(false, "HTTP ${resp.code}: $error", "Ошибка HTTP")
+            }
+            val source = resp.body?.source() ?: return ToolOutcome(false, "Пустой ответ", "Ошибка HTTP")
+            // Bound memory before parsing, even when the server sends an unbounded body.
+            val buffer = Buffer()
+            var remaining = 512_000L
+            while (remaining > 0) {
+                val count = source.read(buffer, minOf(8192L, remaining))
+                if (count == -1L) break
+                remaining -= count
+            }
+            val text = stripHtml(buffer.readUtf8())
+            val trimmed = if (text.length > max || remaining == 0L) text.take(max) + "\n… (обрезано)" else text
             return ToolOutcome(true, trimmed, "Загружено ${resp.code}")
         }
     }

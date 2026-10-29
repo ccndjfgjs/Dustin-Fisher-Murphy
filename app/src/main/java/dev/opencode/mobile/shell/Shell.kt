@@ -1,7 +1,8 @@
 package dev.opencode.mobile.shell
 
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class ShellResult(
@@ -21,18 +22,14 @@ data class RootStatus(
     val selinux: String = ""
 )
 
-/**
- * Исполнитель команд. Умеет работать как от обычного uid приложения, так и через `su`
- * (Magisk / KernelSU / APatch). Это ключевой слой, который даёт приложению "десктопные"
- * возможности opencode: запуск сборок, git, пакетных менеджеров и правку системных файлов.
- */
 object Shell {
-
     private const val MAX_OUTPUT = 400_000
-
     @Volatile private var rootCache: RootStatus? = null
     @Volatile private var rootCheckedAt = 0L
     @Volatile private var shizukuCache: Boolean? = null
+    @Volatile private var temporaryDirectory: File? = null
+
+    fun initialize(cacheDir: File) { temporaryDirectory = cacheDir }
 
     fun invalidate() {
         rootCache = null
@@ -45,33 +42,26 @@ object Shell {
         val cached = rootCache
         if (!force && cached != null && now - rootCheckedAt < 60_000) return cached
 
-        val result = try {
-            val p = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
-            val out = p.inputStream.bufferedReader().use { it.readText() }
-            val finished = p.waitFor(6, TimeUnit.SECONDS)
-            if (!finished) {
-                p.destroyForcibly()
-                RootStatus(false)
-            } else if (!out.contains("uid=0")) {
-                RootStatus(false)
-            } else {
-                val props = runQuiet("su", "-c", "su -v; getprop ro.build.version.release; getenforce")
-                val lines = props.lines().filter { it.isNotBlank() }
-                RootStatus(
-                    available = true,
-                    version = lines.firstOrNull().orEmpty(),
-                    manager = when {
-                        props.contains("MAGISK", true) -> "Magisk"
-                        props.contains("KernelSU", true) -> "KernelSU"
-                        props.contains("APatch", true) -> "APatch"
-                        else -> "su"
-                    },
-                    selinux = lines.lastOrNull().orEmpty()
-                )
-            }
-        } catch (t: Throwable) {
-            RootStatus(false)
-        }
+        // Read the pipe concurrently with waiting: su may wait indefinitely for a grant.
+        val id = runProcess(listOf("su", "-c", "id"), timeoutSec = 6)
+        val result = if (id.ok && id.output.contains("uid=0")) {
+            val props = runProcess(
+                listOf("su", "-c", "su -v; getprop ro.build.version.release; getenforce"),
+                timeoutSec = 5
+            ).output
+            val lines = props.lines().filter { it.isNotBlank() }
+            RootStatus(
+                available = true,
+                version = lines.firstOrNull().orEmpty(),
+                manager = when {
+                    props.contains("MAGISK", true) -> "Magisk"
+                    props.contains("KernelSU", true) -> "KernelSU"
+                    props.contains("APatch", true) -> "APatch"
+                    else -> "su"
+                },
+                selinux = lines.lastOrNull().orEmpty()
+            )
+        } else RootStatus(false)
         rootCache = result
         rootCheckedAt = now
         return result
@@ -79,24 +69,16 @@ object Shell {
 
     fun rootAvailable(force: Boolean = false): Boolean = rootStatus(force).available
 
-    /** Shizuku доступен, если в системе есть rish либо запущен сервис Shizuku. */
     fun shizukuAvailable(): Boolean {
         shizukuCache?.let { return it }
-        val present = runCatching {
-            val p = ProcessBuilder("/system/bin/sh", "-c", "which rish || ls /data/local/tmp/rish 2>/dev/null").redirectErrorStream(true).start()
-            val text = p.inputStream.bufferedReader().use { it.readText() }
-            p.waitFor(4, TimeUnit.SECONDS)
-            text.isNotBlank()
-        }.getOrDefault(false)
-        shizukuCache = present
-        return present
+        val result = runProcess(
+            listOf("/system/bin/sh", "-c", "which rish || ls /data/local/tmp/rish 2>/dev/null"),
+            timeoutSec = 4
+        )
+        return (result.ok && result.output.isNotBlank()).also { shizukuCache = it }
     }
 
-    /**
-     * Запускает команду и возвращает результат.
-     * @param useRoot выполнять через `su -c`
-     * @param onChunk потоковый колбэк (вызывается из фонового потока)
-     */
+    /** Runs a non-interactive command. Output callbacks run on a background thread. */
     fun run(
         command: String,
         cwd: String? = null,
@@ -105,133 +87,154 @@ object Shell {
         onChunk: ((String) -> Unit)? = null
     ): ShellResult {
         val asRoot = useRoot && rootAvailable()
-        val workDir = cwd?.let { File(it) }?.takeIf { it.isDirectory }
-        val process = try {
-            val builder = if (asRoot) {
-                ProcessBuilder("su", "-c", wrapWithCd(command, workDir))
-            } else {
-                ProcessBuilder("/system/bin/sh", "-c", command).apply {
-                    if (workDir != null) directory(workDir)
-                }
-            }
-            builder.redirectErrorStream(true)
-            builder.start()
-        } catch (t: Throwable) {
-            return ShellResult(127, "Не удалось запустить процесс: ${t.message}", usedRoot = asRoot)
+        val workDir = cwd?.let(::File)?.takeIf { it.isDirectory }
+        val commandLine = if (asRoot) {
+            listOf("su", "-c", wrapWithCd(command, workDir))
+        } else {
+            listOf("/system/bin/sh", "-c", command)
         }
+        return runProcess(commandLine, if (asRoot) null else workDir, timeoutSec, onChunk)
+            .copy(usedRoot = asRoot)
+    }
 
-        val sb = StringBuilder()
+    private fun runProcess(
+        command: List<String>,
+        workDir: File? = null,
+        timeoutSec: Int,
+        onChunk: ((String) -> Unit)? = null
+    ): ShellResult {
+        val process = try {
+            ProcessBuilder(command).apply {
+                if (workDir != null) directory(workDir)
+                redirectErrorStream(true)
+            }.start()
+        } catch (t: Exception) {
+            return ShellResult(127, "Не удалось запустить процесс: ${t.message}")
+        }
+        // The terminal is not interactive: signal EOF rather than hanging on input.
+        runCatching { process.outputStream.close() }
+        val output = StringBuilder()
         val truncated = AtomicBoolean(false)
         val reader = Thread {
             try {
-                process.inputStream.bufferedReader().use { br ->
-                    val buf = CharArray(8192)
+                process.inputStream.bufferedReader().use { input ->
+                    val buffer = CharArray(8192)
                     while (true) {
-                        val n = br.read(buf)
-                        if (n <= 0) break
-                        val chunk = String(buf, 0, n)
-                        synchronized(sb) {
-                            if (sb.length < MAX_OUTPUT) sb.append(chunk) else truncated.set(true)
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        val kept = synchronized(output) {
+                            val remaining = (MAX_OUTPUT - output.length).coerceAtLeast(0)
+                            val length = minOf(count, remaining)
+                            if (length < count) truncated.set(true)
+                            if (length > 0) String(buffer, 0, length).also { output.append(it) } else ""
                         }
-                        runCatching { onChunk?.invoke(chunk) }
+                        if (kept.isNotEmpty()) runCatching { onChunk?.invoke(kept) }
                     }
                 }
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
+                // Closing the pipe after a timeout/interruption is expected.
             }
-        }
-        reader.isDaemon = true
-        reader.start()
+        }.apply { isDaemon = true; start() }
 
-        val deadline = System.currentTimeMillis() + timeoutSec * 1000L
         var finished = false
         var timedOut = false
-        while (true) {
-            if (process.waitFor(200, TimeUnit.MILLISECONDS)) {
-                finished = true
-                break
+        val deadline = System.nanoTime() + timeoutSec.coerceIn(1, 1800) * 1_000_000_000L
+        try {
+            // Process.waitFor(timeout, unit) was added only in API 26. Polling keeps
+            // the command runner compatible with Android 7 (API 24/25).
+            while (true) {
+                try {
+                    process.exitValue()
+                    finished = true
+                    break
+                } catch (_: IllegalThreadStateException) {
+                    if (System.nanoTime() >= deadline) {
+                        timedOut = true
+                        process.destroy()
+                        break
+                    }
+                    Thread.sleep(50)
+                }
             }
-            if (System.currentTimeMillis() > deadline) {
-                timedOut = true
-                process.destroyForcibly()
-                break
-            }
-            if (Thread.currentThread().isInterrupted) {
-                process.destroyForcibly()
-                timedOut = true
-                break
-            }
+            reader.join(1_000)
+        } catch (interrupted: InterruptedException) {
+            process.destroy()
+            runCatching { process.inputStream.close() }
+            Thread.currentThread().interrupt()
+            throw interrupted
+        } finally {
+            if (!finished) process.destroy()
+            if (reader.isAlive) runCatching { process.inputStream.close() }
         }
-        reader.join(1500)
         val exit = runCatching { process.exitValue() }.getOrDefault(if (finished) 0 else 137)
-        val text = synchronized(sb) { sb.toString() }
+        val text = synchronized(output) { output.toString() }
         return ShellResult(
             exitCode = exit,
             output = if (timedOut) "$text\n[таймаут ${timeoutSec}s]".trim() else text,
             timedOut = timedOut,
-            usedRoot = asRoot,
             truncated = truncated.get()
         )
     }
 
-    private fun wrapWithCd(command: String, workDir: File?): String {
-        if (workDir == null) return command
-        return "cd ${quote(workDir.absolutePath)} 2>/dev/null || cd /; $command"
-    }
+    private fun wrapWithCd(command: String, workDir: File?): String =
+        if (workDir == null) command else "cd ${quote(workDir.absolutePath)} && $command"
 
     fun quote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
-    private fun runQuiet(vararg args: String): String = try {
-        val p = ProcessBuilder(*args).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().use { it.readText() }
-        p.waitFor(5, TimeUnit.SECONDS)
-        out.trim()
-    } catch (t: Throwable) {
-        ""
-    }
-
-    /** Чтение файла с fallback на root, если обычный доступ запрещён. */
-    fun readText(path: String): String? {
-        val f = File(path)
-        if (f.canRead() && f.isFile) {
-            runCatching { return f.readText() }
-        }
-        if (rootAvailable()) {
-            val r = run("cat ${quote(path)}", useRoot = true, timeoutSec = 30)
-            if (r.ok) return r.output
+    /** Root fallback is opt-in; a discovered su must never override the user's setting. */
+    fun readText(path: String, allowRoot: Boolean = false): String? {
+        val file = File(path)
+        if (file.canRead() && file.isFile) runCatching { return file.readText() }
+        if (allowRoot && rootAvailable()) {
+            val result = run("cat ${quote(path)}", useRoot = true, timeoutSec = 30)
+            if (result.ok && !result.truncated) return result.output
         }
         return null
     }
 
-    /** Запись файла с fallback на root (через временный файл + cp). */
-    fun writeText(path: String, content: String): Boolean {
-        val f = File(path)
+    fun writeText(path: String, content: String, allowRoot: Boolean = false): Boolean {
+        val file = File(path)
         runCatching {
-            f.parentFile?.mkdirs()
-            f.writeText(content)
+            file.parentFile?.mkdirs()
+            file.writeText(content)
             return true
         }
-        if (!rootAvailable()) return false
-        return runCatching {
-            val tmp = File.createTempFile("ocm", ".tmp")
+        if (!allowRoot || !rootAvailable()) return false
+        var tmp: File? = null
+        return try {
+            tmp = File.createTempFile("ocm", ".tmp", temporaryDirectory ?: return false)
             tmp.writeText(content)
-            val r = run(
-                "mkdir -p ${quote(f.parentFile?.absolutePath ?: "/")} && cp ${quote(tmp.absolutePath)} ${quote(path)} && chmod 644 ${quote(path)}",
+            run(
+                "mkdir -p ${quote(file.parentFile?.absolutePath ?: "/")} && cp ${quote(tmp.absolutePath)} ${quote(path)}",
                 useRoot = true,
                 timeoutSec = 60
-            )
-            tmp.delete()
-            r.ok
-        }.getOrDefault(false)
+            ).ok
+        } catch (_: Exception) {
+            false
+        } finally {
+            tmp?.delete()
+        }
     }
 
-    fun delete(path: String, recursive: Boolean): Boolean {
-        val f = File(path)
-        runCatching {
-            val ok = if (recursive) f.deleteRecursively() else f.delete()
-            if (ok) return true
+    /** Do not descend through symbolic links when recursively deleting a directory. */
+    private fun deleteLocally(file: File, recursive: Boolean): Boolean {
+        if (recursive && file.isDirectory && !isSymlink(file)) {
+            val children = file.listFiles() ?: return false
+            if (children.any { !deleteLocally(it, true) }) return false
         }
-        if (!rootAvailable()) return false
-        val r = run("rm ${if (recursive) "-rf" else ""} ${quote(path)}", useRoot = true, timeoutSec = 60)
-        return r.ok
+        return file.delete()
+    }
+
+    fun isSymlink(file: File): Boolean = try {
+        OsConstants.S_ISLNK(Os.lstat(file.absolutePath).st_mode)
+    } catch (_: Exception) {
+        false
+    }
+
+    fun delete(path: String, recursive: Boolean, allowRoot: Boolean = false): Boolean {
+        val file = File(path)
+        if (runCatching { deleteLocally(file, recursive) }.getOrDefault(false)) return true
+        if (!allowRoot || !rootAvailable()) return false
+        return run("rm ${if (recursive) "-rf" else ""} -- ${quote(path)}", useRoot = true, timeoutSec = 60).ok
     }
 }

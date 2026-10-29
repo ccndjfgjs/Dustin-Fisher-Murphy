@@ -92,7 +92,7 @@ data class Provider(
 data class AppSettings(
     val providers: List<Provider> = Provider.defaults(),
     val activeProviderId: String = providers.first().id,
-    val allowRoot: Boolean = true,
+    val allowRoot: Boolean = false,
     val autoApproveTools: Boolean = false,
     val maxIterations: Int = 40,
     val systemAppend: String = "",
@@ -132,7 +132,7 @@ data class AppSettings(
             return AppSettings(
                 providers = providers,
                 activeProviderId = o.optString("activeProviderId", providers.first().id),
-                allowRoot = o.optBoolean("allowRoot", true),
+                allowRoot = o.optBoolean("allowRoot", false),
                 autoApproveTools = o.optBoolean("autoApproveTools", false),
                 maxIterations = o.optInt("maxIterations", 40),
                 systemAppend = o.optString("systemAppend", ""),
@@ -145,25 +145,70 @@ data class AppSettings(
     }
 }
 
-class Prefs(context: Context) {
-    private val sp = context.applicationContext.getSharedPreferences("opencode_settings", Context.MODE_PRIVATE)
+/** Settings are encrypted as one authenticated record, including provider API keys. */
+class Prefs(
+    context: Context,
+    preferenceName: String = "opencode_settings",
+    keyAlias: String = "opencode_settings_aes_v1"
+) {
+    private val sp = context.applicationContext.getSharedPreferences(preferenceName, Context.MODE_PRIVATE)
+    private val cipher = SettingsCipher(keyAlias)
+    private val lock = Any()
+    private var persistenceBlocked = false
+    private val _storageError = MutableStateFlow<String?>(null)
+    val storageError: StateFlow<String?> = _storageError.asStateFlow()
     private val _settings = MutableStateFlow(load())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
-    private fun load(): AppSettings = try {
-        val raw = sp.getString(KEY, null)
-        if (raw.isNullOrBlank()) AppSettings() else AppSettings.fromJson(JSONObject(raw))
-    } catch (t: Throwable) {
-        AppSettings()
+    private fun failClosed() {
+        // Do not overwrite the old ciphertext/plaintext if the keystore becomes unusable.
+        persistenceBlocked = true
+        _storageError.value = "Не удалось защитить или прочитать настройки. Изменения действуют только до закрытия приложения; сохранённые данные не перезаписаны."
     }
 
-    fun update(transform: (AppSettings) -> AppSettings) {
+    private fun load(): AppSettings {
+        val encrypted = sp.getString(ENCRYPTED_KEY, null)
+        if (encrypted != null) {
+            return try {
+                AppSettings.fromJson(JSONObject(cipher.decrypt(encrypted)))
+            } catch (_: Exception) {
+                failClosed()
+                AppSettings()
+            }
+        }
+        val legacy = sp.getString(LEGACY_KEY, null)
+        if (legacy.isNullOrBlank()) return AppSettings()
+        val previous = try {
+            AppSettings.fromJson(JSONObject(legacy))
+        } catch (_: Exception) {
+            failClosed()
+            return AppSettings()
+        }
+        try {
+            val protected = cipher.encrypt(legacy)
+            check(sp.edit().putString(ENCRYPTED_KEY, protected).remove(LEGACY_KEY).commit())
+        } catch (_: Exception) {
+            // Keep the legacy record intact so the user's settings are not lost.
+            failClosed()
+        }
+        return previous
+    }
+
+    fun update(transform: (AppSettings) -> AppSettings) = synchronized(lock) {
         val next = transform(_settings.value)
+        if (!persistenceBlocked) {
+            try {
+                val protected = cipher.encrypt(next.toJson().toString())
+                check(sp.edit().putString(ENCRYPTED_KEY, protected).remove(LEGACY_KEY).commit())
+            } catch (_: Exception) {
+                failClosed()
+            }
+        }
         _settings.value = next
-        sp.edit().putString(KEY, next.toJson().toString()).apply()
     }
 
     private companion object {
-        const val KEY = "settings_v1"
+        const val LEGACY_KEY = "settings_v1"
+        const val ENCRYPTED_KEY = "settings_v2_encrypted"
     }
 }

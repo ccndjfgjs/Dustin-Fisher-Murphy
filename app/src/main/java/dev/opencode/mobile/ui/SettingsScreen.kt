@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
@@ -42,6 +43,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.opencode.mobile.data.Provider
@@ -61,7 +64,10 @@ fun SettingsScreen(vm: AppViewModel) {
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
     ) {
-        ScreenHeader(title = "Настройки", subtitle = "OpenCode Mobile 0.1.0")
+        ScreenHeader(title = "Настройки", subtitle = "OpenCode Mobile 0.2.0")
+        ui.storageError?.let { error ->
+            Text(error, color = Danger, fontSize = 12.sp, modifier = Modifier.padding(14.dp))
+        }
 
         Section("Провайдер и модель")
         settings.providers.forEach { provider ->
@@ -372,10 +378,17 @@ private fun ProviderDialog(provider: Provider?, onDismiss: () -> Unit, onSave: (
                     )
                 }
                 OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true)
-                OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API-ключ") }, singleLine = true)
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text("API-ключ") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true
+                )
                 OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Модель") }, singleLine = true)
                 Text(
-                    "Локальная модель: Ollama → http://127.0.0.1:11434/v1, LM Studio → http://IP:1234/v1",
+                    "Ollama на телефоне: http://127.0.0.1:11434/v1; на ПК из Android Emulator: http://10.0.2.2:11434/v1. HTTP разрешён только локально и без API-ключа; данные при этом не шифруются.",
                     fontSize = 10.sp,
                     color = Muted
                 )
