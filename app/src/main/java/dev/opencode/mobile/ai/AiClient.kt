@@ -5,6 +5,7 @@ import dev.opencode.mobile.data.ModelReasoningCatalog
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.ReasoningLevel
 import dev.opencode.mobile.data.ReasoningProtocol
+import dev.opencode.mobile.data.TokenUsage
 import dev.opencode.mobile.tools.ToolSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -50,7 +51,8 @@ data class AiResponse(
     val toolCalls: List<AiToolCall> = emptyList(),
     val finishReason: String? = null,
     val reasoning: String = "",
-    val anthropicBlocks: List<String> = emptyList()
+    val anthropicBlocks: List<String> = emptyList(),
+    val usage: TokenUsage? = null
 )
 
 class AiException(message: String, val status: Int = 0) : Exception(message)
@@ -134,6 +136,9 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         val root = JSONObject()
         root.put("model", req.model)
         root.put("stream", req.stream)
+        if (req.stream && (provider.streamUsage ?: ProviderRequestPolicy.defaultStreamUsage(provider.baseUrl))) {
+            root.put("stream_options", JSONObject().put("include_usage", true))
+        }
         val protocol = ModelReasoningCatalog.capability(provider, req.model)?.protocol
         if (protocol == ReasoningProtocol.OPENAI_EFFORT) {
             // OpenAI o-series reject the legacy max_tokens and non-default temperature.
@@ -221,6 +226,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         var finish: String? = null
         var sawSse = false
         var done = false
+        var usage: TokenUsage? = null
         val raw = StringBuilder()
 
         while (true) {
@@ -235,6 +241,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                     val err = obj.opt("error")
                     throw AiException(err.toString())
                 }
+                UsageParser.openAi(obj.optJSONObject("usage"), ProviderRequestPolicy.isOpenRouter(provider.baseUrl))?.let { usage = it }
                 val choices = obj.optJSONArray("choices") ?: continue
                 val choice = choices.optJSONObject(0) ?: continue
                 val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message")
@@ -291,7 +298,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                 googleThoughtSignature = signatures[idx]
             )
         }.filter { it.name.isNotBlank() }
-        return AiResponse(content.toString(), calls, finish, reasoning.toString())
+        return AiResponse(content.toString(), calls, finish, reasoning.toString(), usage = usage)
     }
 
     internal fun parseNonStream(raw: String): AiResponse {
@@ -318,7 +325,8 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
             }
         }
         val reasoning = message.textOrEmpty("reasoning_content").ifEmpty { message.textOrEmpty("reasoning") }
-        return AiResponse(content, calls, reasoning = reasoning)
+        return AiResponse(content, calls, reasoning = reasoning,
+            usage = UsageParser.openAi(obj.optJSONObject("usage"), ProviderRequestPolicy.isOpenRouter(provider.baseUrl)))
     }
 }
 
@@ -392,7 +400,8 @@ class AnthropicClient(private val provider: Provider) : AiClient {
                 }
             }
         }
-        return AiResponse(content.toString(), calls, obj.optString("stop_reason"), reasoning.toString(), blocks)
+        val usage = UsageParser.Anthropic().apply { update(obj.optJSONObject("usage")) }.result()
+        return AiResponse(content.toString(), calls, obj.optString("stop_reason"), reasoning.toString(), blocks, usage)
     }
 
     internal fun buildPayload(req: AiRequest): JSONObject {
@@ -493,6 +502,7 @@ class AnthropicClient(private val provider: Provider) : AiClient {
         val reasoning = StringBuilder()
         val blocks = sortedMapOf<Int, JSONObject>()
         val toolJson = mutableMapOf<Int, StringBuilder>()
+        val usage = UsageParser.Anthropic()
         var finish: String? = null
         var done = false
 
@@ -504,6 +514,7 @@ class AnthropicClient(private val provider: Provider) : AiClient {
             val obj = runCatching { JSONObject(data) }.getOrNull() ?: continue
             when (obj.optString("type")) {
                 "error" -> throw AiException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка API")
+                "message_start" -> usage.update(obj.optJSONObject("message")?.optJSONObject("usage"))
                 "content_block_start" -> {
                     val idx = obj.optInt("index", 0)
                     val block = obj.optJSONObject("content_block") ?: continue
@@ -545,7 +556,10 @@ class AnthropicClient(private val provider: Provider) : AiClient {
                         blocks[idx]?.put("input", input)
                     }
                 }
-                "message_delta" -> finish = obj.optJSONObject("delta")?.textOrEmpty("stop_reason")?.ifBlank { null }
+                "message_delta" -> {
+                    finish = obj.optJSONObject("delta")?.textOrEmpty("stop_reason")?.ifBlank { finish }
+                    usage.update(obj.optJSONObject("usage"))
+                }
                 "message_stop" -> { done = true; break }
             }
         }
@@ -557,6 +571,6 @@ class AnthropicClient(private val provider: Provider) : AiClient {
                 arguments = block.optJSONObject("input")?.toString() ?: "{}"
             ).takeIf { it.name.isNotBlank() }
         }
-        return AiResponse(content.toString(), calls, finish, reasoning.toString(), blocks.values.map { it.toString() })
+        return AiResponse(content.toString(), calls, finish, reasoning.toString(), blocks.values.map { it.toString() }, usage.result())
     }
 }

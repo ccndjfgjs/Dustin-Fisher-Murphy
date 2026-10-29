@@ -20,7 +20,10 @@ data class Provider(
     val baseUrl: String,
     val apiKey: String = "",
     val model: String,
-    val extraModels: List<String> = emptyList()
+    val extraModels: List<String> = emptyList(),
+    val pricing: List<ModelPricing> = emptyList(),
+    // null means use only a small list of known endpoints; custom servers opt in explicitly.
+    val streamUsage: Boolean? = null
 ) {
     val models: List<String> get() = (listOf(model) + extraModels).distinct().filter { it.isNotBlank() }
 
@@ -39,6 +42,8 @@ data class Provider(
         .put("apiKey", apiKey)
         .put("model", model)
         .put("extraModels", JSONArray(extraModels))
+        .put("pricing", JSONArray().apply { pricing.forEach { put(it.toJson()) } })
+        .apply { streamUsage?.let { put("streamUsage", it) } }
 
     companion object {
         fun fromJson(o: JSONObject): Provider {
@@ -53,7 +58,11 @@ data class Provider(
                 baseUrl = o.optString("baseUrl", ""),
                 apiKey = o.optString("apiKey", ""),
                 model = o.optString("model", ""),
-                extraModels = extra
+                extraModels = extra,
+                pricing = o.optJSONArray("pricing")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { index -> arr.optJSONObject(index)?.let { ModelPricing.fromJson(it) } }
+                } ?: emptyList(),
+                streamUsage = if (o.has("streamUsage") && !o.isNull("streamUsage")) o.optBoolean("streamUsage") else null
             )
         }
 

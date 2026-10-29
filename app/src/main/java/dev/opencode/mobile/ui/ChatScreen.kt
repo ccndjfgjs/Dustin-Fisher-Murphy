@@ -112,6 +112,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.util.Locale
 
 @Composable
 fun ChatScreen(vm: AppViewModel) {
@@ -120,7 +121,7 @@ fun ChatScreen(vm: AppViewModel) {
     val session = ui.session
     // Empty assistant tool-call envelopes are represented by the tool cards themselves.
     val messages = session?.messages.orEmpty().filterNot {
-        it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.reasoning.isBlank() && it.toolCalls.isNotEmpty()
+        it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.reasoning.isBlank() && it.toolCalls.isNotEmpty() && it.usage == null
     }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -517,6 +518,18 @@ internal fun AssistantMessage(message: ChatMessage, onSettings: () -> Unit) {
             Text("Запускаю инструменты…", color = Muted, fontSize = 12.sp)
         } else {
             Text("Модель не вернула текст.", color = Muted, fontSize = 12.sp)
+        }
+        if (!message.streaming && message.errorStatus == null) {
+            val usage = message.usage
+            val tokens = if (usage == null) "Токены: нет данных" else
+                "Токены: вход ${usage.inputTokens?.toString() ?: "—"}, выход ${usage.outputTokens?.toString() ?: "—"}" +
+                    (if (usage.cachedInputTokens > 0) " · кэш ${usage.cachedInputTokens}" else "")
+            val cost = usage?.costUsd?.let {
+                val amount = if (it > 0 && it < 0.000001) "< $0.000001" else String.format(Locale.US, "$%.6f", it)
+                if (usage.estimated) "оценка $amount" else "по API $amount"
+            } ?: "нет данных"
+            Text("$tokens · Стоимость: $cost", color = Muted, fontSize = 10.sp,
+                modifier = Modifier.padding(top = 8.dp).testTag("response-usage"))
         }
         if (message.errorStatus == 401) {
             TextButton(onClick = onSettings) { Text("Открыть настройки") }

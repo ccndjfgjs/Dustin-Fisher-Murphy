@@ -15,6 +15,11 @@ object ChatExport {
             if (message.reasoning.isNotBlank()) {
                 append("### Рассуждение\n\n").append(message.reasoning).append("\n\n")
             }
+            message.usage?.let { usage ->
+                append("Токены: вход ").append(usage.inputTokens ?: "—").append(", выход ").append(usage.outputTokens ?: "—")
+                usage.costUsd?.let { append("; ").append(if (usage.estimated) "оценка" else "по API").append(" USD ").append(it) }
+                append("\n\n")
+            }
             if (message.toolArgs != null) append("Аргументы: ").append(message.toolArgs).append("\n\n")
             if (message.content.isNotBlank()) append(message.content).append("\n\n")
             message.attachments.forEach { attachment ->

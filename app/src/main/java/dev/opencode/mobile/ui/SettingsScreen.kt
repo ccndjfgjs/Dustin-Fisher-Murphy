@@ -55,7 +55,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.opencode.mobile.ai.ProviderRequestPolicy
 import dev.opencode.mobile.ai.ProviderUrlPolicy
+import dev.opencode.mobile.data.ModelPricing
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.ProviderPreset
 import dev.opencode.mobile.shell.Shell
@@ -403,6 +405,20 @@ internal fun ProviderDialog(
     var clipboardHint by remember(provider?.id) { mutableStateOf<String?>(null) }
     var model by remember(provider?.id) { mutableStateOf(provider?.model ?: "") }
     var kind by remember(provider?.id) { mutableStateOf(provider?.kind ?: "openai") }
+    var streamUsage by remember(provider?.id) {
+        mutableStateOf(provider?.streamUsage ?: ProviderRequestPolicy.defaultStreamUsage(provider?.baseUrl ?: baseUrl))
+    }
+    val currentPricing = provider?.pricing?.firstOrNull {
+        it.model == model.trim() && provider?.baseUrl.orEmpty().trimEnd('/') == baseUrl.trim().trimEnd('/') && provider?.kind == kind
+    }
+    var inputRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.input?.toString().orEmpty()) }
+    var outputRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.output?.toString().orEmpty()) }
+    var cachedRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.cachedInput?.toString().orEmpty()) }
+    var writeRate by remember(provider?.id, model, baseUrl, kind) { mutableStateOf(currentPricing?.cacheWrite?.toString().orEmpty()) }
+    fun rate(value: String): Double? = value.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }
+    val ratesBlank = listOf(inputRate, outputRate, cachedRate, writeRate).all { it.isBlank() }
+    val ratesValid = ratesBlank || (rate(inputRate) != null && rate(outputRate) != null &&
+        (cachedRate.isBlank() || rate(cachedRate) != null) && (writeRate.isBlank() || rate(writeRate) != null))
     val clipboard = LocalClipboardManager.current
     val urlError = if (baseUrl.isBlank()) null else ProviderUrlPolicy.error(baseUrl, apiKey)
 
@@ -461,6 +477,24 @@ internal fun ProviderDialog(
                 ) { Text("Вставить из буфера") }
                 clipboardHint?.let { Text(it, color = Danger, fontSize = 11.sp, lineHeight = 15.sp) }
                 OutlinedTextField(value = model, onValueChange = { model = it }, modifier = Modifier.fillMaxWidth().testTag("provider-model"), label = { Text("Модель") }, singleLine = true)
+                if (kind == "openai") {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Запрашивать токены в потоке", fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Switch(checked = streamUsage, onCheckedChange = { streamUsage = it })
+                    }
+                    Text("Для несовместимых серверов отключите stream_options или используйте ответ без потока.", color = Muted, fontSize = 10.sp)
+                }
+                Text("Тариф этой модели · USD за 1 млн токенов (необязательно)", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                Text("Введите актуальные цены провайдера. Расчёт — оценка, не счёт; подписки, налоги и специальные тарифы не учитываются.", color = Muted, fontSize = 10.sp)
+                OutlinedTextField(value = inputRate, onValueChange = { inputRate = it }, singleLine = true,
+                    label = { Text("Вход, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth().testTag("price-input"))
+                OutlinedTextField(value = outputRate, onValueChange = { outputRate = it }, singleLine = true,
+                    label = { Text("Выход, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth().testTag("price-output"))
+                OutlinedTextField(value = cachedRate, onValueChange = { cachedRate = it }, singleLine = true,
+                    label = { Text("Чтение кэша, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = writeRate, onValueChange = { writeRate = it }, singleLine = true,
+                    label = { Text("Запись кэша, $ / 1 млн") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                if (!ratesValid) Text("Заполните цены входа и выхода неотрицательными числами.", color = Danger, fontSize = 11.sp)
                 Text(
                     "Адрес и ID модели можно изменить. HTTP разрешён только для локального сервера и без API-ключа; данные при этом не шифруются.",
                     fontSize = 10.sp, color = Muted, lineHeight = 15.sp
@@ -469,10 +503,15 @@ internal fun ProviderDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = name.isNotBlank() && baseUrl.isNotBlank() && model.isNotBlank() && urlError == null,
+                enabled = name.isNotBlank() && baseUrl.isNotBlank() && model.isNotBlank() && urlError == null && ratesValid,
                 onClick = {
+                    val previousPrices = if (provider != null && provider.baseUrl.trimEnd('/') == baseUrl.trim().trimEnd('/') && provider.kind == kind)
+                        provider.pricing else emptyList()
+                    val prices = previousPrices.filterNot { it.model == model.trim() }.toMutableList()
+                    if (!ratesBlank) prices.add(ModelPricing(model.trim(), rate(inputRate)!!, rate(outputRate)!!, rate(cachedRate), rate(writeRate)))
                     val result = (provider ?: Provider(name = name.trim(), baseUrl = baseUrl.trim(), model = model.trim()))
-                        .withModel(model).copy(name = name.trim(), baseUrl = baseUrl.trim(), apiKey = apiKey.trim(), kind = kind)
+                        .withModel(model).copy(name = name.trim(), baseUrl = baseUrl.trim(), apiKey = apiKey.trim(), kind = kind,
+                            pricing = prices, streamUsage = streamUsage)
                     onSave(result)
                 }
             ) { Text("Сохранить") }

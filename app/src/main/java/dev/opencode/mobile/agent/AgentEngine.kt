@@ -13,6 +13,7 @@ import dev.opencode.mobile.data.ReasoningLevel
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.TodoItem
 import dev.opencode.mobile.data.ToolCallRef
+import dev.opencode.mobile.data.UsageCost
 import dev.opencode.mobile.shell.Shell
 import dev.opencode.mobile.tools.ToolContext
 import dev.opencode.mobile.tools.ToolOutcome
@@ -114,6 +115,7 @@ class AgentEngine {
                     reasoning = response.reasoning,
                     reasoningDurationMs = reasoningDuration(),
                     anthropicTrace = trace,
+                    usage = UsageCost.calculate(response.usage, provider.pricing.firstOrNull { it.model == model }),
                     toolCalls = response.toolCalls.map { ToolCallRef(it.id, it.name, it.arguments, it.googleThoughtSignature) }
                 )
                 listener.onAssistantDone(assistantMsg)
