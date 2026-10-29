@@ -77,7 +77,7 @@ class AgentEngine {
                 val assistantMsg = ChatMessage(
                     role = Role.ASSISTANT,
                     content = response.content,
-                    toolCalls = response.toolCalls.map { ToolCallRef(it.id, it.name, it.arguments) }
+                    toolCalls = response.toolCalls.map { ToolCallRef(it.id, it.name, it.arguments, it.googleThoughtSignature) }
                 )
                 listener.onAssistantDone(assistantMsg)
                 messages.add(

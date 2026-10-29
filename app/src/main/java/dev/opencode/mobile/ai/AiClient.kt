@@ -14,7 +14,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-data class AiToolCall(val id: String, val name: String, val arguments: String)
+data class AiToolCall(
+    val id: String,
+    val name: String,
+    val arguments: String,
+    val googleThoughtSignature: String? = null
+)
 
 data class AiMessage(
     val role: String,
@@ -67,6 +72,9 @@ object AiClients {
 
 private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
+// Android's JSONObject.optString turns a JSON null into the literal text "null".
+private fun JSONObject.textOrEmpty(key: String): String = if (isNull(key)) "" else optString(key, "")
+
 internal val sharedHttp: OkHttpClient = OkHttpClient.Builder()
     .connectTimeout(30, TimeUnit.SECONDS)
     .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -110,12 +118,18 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         }
     }
 
-    private fun buildPayload(req: AiRequest): JSONObject {
+    internal fun buildPayload(req: AiRequest): JSONObject {
         val root = JSONObject()
         root.put("model", req.model)
         root.put("stream", req.stream)
         root.put("temperature", req.temperature)
         root.put("max_tokens", req.maxTokens)
+        if (ProviderRequestPolicy.disableDeepSeekThinking(provider.baseUrl)) {
+            root.put("thinking", JSONObject().put("type", "disabled"))
+        }
+        if (ProviderRequestPolicy.disableAlibabaThinking(provider.baseUrl, req.model)) {
+            root.put("enable_thinking", false)
+        }
         val messages = JSONArray()
         if (req.system.isNotBlank()) {
             messages.put(JSONObject().put("role", "system").put("content", req.system))
@@ -134,16 +148,20 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                     if (m.toolCalls.isNotEmpty()) {
                         val calls = JSONArray()
                         m.toolCalls.forEach { tc ->
-                            calls.put(
-                                JSONObject()
-                                    .put("id", tc.id)
-                                    .put("type", "function")
-                                    .put(
-                                        "function", JSONObject()
-                                            .put("name", tc.name)
-                                            .put("arguments", tc.arguments.ifBlank { "{}" })
-                                    )
-                            )
+                            val call = JSONObject()
+                                .put("id", tc.id)
+                                .put("type", "function")
+                                .put(
+                                    "function", JSONObject()
+                                        .put("name", tc.name)
+                                        .put("arguments", tc.arguments.ifBlank { "{}" })
+                                )
+                            if (ProviderRequestPolicy.isGoogleGemini(provider.baseUrl) && tc.googleThoughtSignature != null) {
+                                call.put("extra_content", JSONObject().put(
+                                    "google", JSONObject().put("thought_signature", tc.googleThoughtSignature)
+                                ))
+                            }
+                            calls.put(call)
                         }
                         o.put("tool_calls", calls)
                     }
@@ -162,11 +180,12 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
         return root
     }
 
-    private suspend fun parseStream(source: BufferedSource, onDelta: suspend (String) -> Unit): AiResponse {
+    internal suspend fun parseStream(source: BufferedSource, onDelta: suspend (String) -> Unit): AiResponse {
         val content = StringBuilder()
         val args = LinkedHashMap<Int, StringBuilder>()
         val names = HashMap<Int, String>()
         val ids = HashMap<Int, String>()
+        val signatures = HashMap<Int, String>()
         var finish: String? = null
         var sawSse = false
         val raw = StringBuilder()
@@ -187,7 +206,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                 val choice = choices.optJSONObject(0) ?: continue
                 val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message")
                 if (delta != null) {
-                    val text = delta.optString("content", "")
+                    val text = delta.textOrEmpty("content")
                     if (text.isNotEmpty()) {
                         content.append(text)
                         onDelta(text)
@@ -195,13 +214,20 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                     delta.optJSONArray("tool_calls")?.let { calls ->
                         for (i in 0 until calls.length()) {
                             val tc = calls.optJSONObject(i) ?: continue
-                            val index = tc.optInt("index", i)
-                            val id = tc.optString("id", "")
+                            val id = tc.textOrEmpty("id")
+                            // Some Gemini-compatible chunks omit the OpenAI index but include an ID.
+                            val index = if (!tc.isNull("index")) tc.optInt("index", i)
+                                else if (id.isNotBlank()) ids.entries.firstOrNull { it.value == id }?.key
+                                    ?: if (i !in ids && i !in args) i else ((ids.keys + args.keys).maxOrNull() ?: -1) + 1
+                                else i
                             if (id.isNotBlank()) ids[index] = id
+                            tc.optJSONObject("extra_content")?.optJSONObject("google")
+                                ?.textOrEmpty("thought_signature")?.takeIf { it.isNotEmpty() }
+                                ?.let { signatures[index] = it }
                             val fn = tc.optJSONObject("function")
-                            val name = fn?.optString("name", "").orEmpty()
+                            val name = fn?.textOrEmpty("name").orEmpty()
                             if (name.isNotBlank()) names[index] = name
-                            val partial = fn?.optString("arguments", "").orEmpty()
+                            val partial = fn?.textOrEmpty("arguments").orEmpty()
                             if (partial.isNotEmpty()) {
                                 args.getOrPut(index) { StringBuilder() }.append(partial)
                             } else if (!args.containsKey(index)) {
@@ -210,7 +236,7 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                         }
                     }
                 }
-                choice.optString("finish_reason", "").takeIf { it.isNotBlank() }?.let { finish = it }
+                choice.textOrEmpty("finish_reason").takeIf { it.isNotBlank() }?.let { finish = it }
             } else if (!sawSse && line.isNotBlank()) {
                 if (raw.length < 4_000_000) raw.append(line).append('\n')
             }
@@ -222,19 +248,20 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
             AiToolCall(
                 id = ids[idx] ?: "call_$idx",
                 name = names[idx].orEmpty(),
-                arguments = args[idx]?.toString().orEmpty().ifBlank { "{}" }
+                arguments = args[idx]?.toString().orEmpty().ifBlank { "{}" },
+                googleThoughtSignature = signatures[idx]
             )
         }.filter { it.name.isNotBlank() }
         return AiResponse(content.toString(), calls, finish)
     }
 
-    private fun parseNonStream(raw: String): AiResponse {
+    internal fun parseNonStream(raw: String): AiResponse {
         if (raw.isBlank()) throw AiException("Пустой ответ модели")
         val obj = runCatching { JSONObject(raw) }.getOrElse { throw AiException("Не удалось разобрать ответ: ${raw.take(300)}") }
         if (obj.has("error")) throw AiException(obj.opt("error").toString())
         val message = obj.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
             ?: throw AiException("В ответе нет choices[0].message")
-        val content = message.optString("content", "")
+        val content = message.textOrEmpty("content")
         val calls = mutableListOf<AiToolCall>()
         message.optJSONArray("tool_calls")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -242,9 +269,11 @@ class OpenAiCompatibleClient(private val provider: Provider) : AiClient {
                 val fn = tc.optJSONObject("function") ?: continue
                 calls.add(
                     AiToolCall(
-                        id = tc.optString("id", "call_$i"),
-                        name = fn.optString("name", ""),
-                        arguments = fn.optString("arguments", "{}")
+                        id = tc.textOrEmpty("id").ifBlank { "call_$i" },
+                        name = fn.textOrEmpty("name"),
+                        arguments = fn.textOrEmpty("arguments").ifBlank { "{}" },
+                        googleThoughtSignature = tc.optJSONObject("extra_content")?.optJSONObject("google")
+                            ?.textOrEmpty("thought_signature")?.takeIf { it.isNotEmpty() }
                     )
                 )
             }

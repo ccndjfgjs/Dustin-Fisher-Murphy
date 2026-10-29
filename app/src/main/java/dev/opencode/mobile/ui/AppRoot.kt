@@ -13,6 +13,10 @@ import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -48,14 +52,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.opencode.mobile.R
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppRoot(vm: AppViewModel) {
     val ui = vm.ui
     val snackbar = remember { SnackbarHostState() }
+    val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
     LaunchedEffect(ui.toast) {
         val msg = ui.toast
@@ -78,7 +85,7 @@ fun AppRoot(vm: AppViewModel) {
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
-            if (ui.screen != Screen.EDITOR) {
+            if (ui.screen != Screen.EDITOR && !(ui.screen == Screen.CHAT && keyboardVisible)) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -95,7 +102,7 @@ fun AppRoot(vm: AppViewModel) {
             }
         }
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             when (ui.screen) {
                 Screen.CHAT -> ChatScreen(vm)
                 Screen.WORKSPACE -> WorkspaceScreen(vm)
