@@ -1,6 +1,8 @@
 package dev.opencode.mobile.ui
 
 import android.app.Application
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -49,12 +51,13 @@ data class UiState(
     val checkingRoot: Boolean = false,
     val terminalLog: List<String> = emptyList(),
     val terminalRunning: Boolean = false,
-    val useRootTerminal: Boolean = true,
+    val useRootTerminal: Boolean = false,
     val editorPath: String? = null,
     val editorText: String = "",
     val editorDirty: Boolean = false,
     val error: String? = null,
     val toast: String? = null,
+    val storageError: String? = null,
     val settings: AppSettings = AppSettings()
 )
 
@@ -71,6 +74,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
     private var pendingOutput = StringBuilder()
     private var lastChunkFlush = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var agentRunId = 0L
 
     init {
         ui = ui.copy(settings = application.prefs.settings.value)
@@ -80,12 +85,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
+            application.prefs.storageError.collect { error -> ui = ui.copy(storageError = error) }
+        }
+        viewModelScope.launch {
             val ws = withContext(Dispatchers.IO) { ensureWorkspace() }
             ui = ui.copy(workspace = ws)
             refreshEntries()
             refreshSessions()
             openOrCreateSession()
-            checkRoot(true)
+            if (application.prefs.settings.value.allowRoot) checkRoot(true)
         }
     }
 
@@ -101,7 +109,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         for (path in candidates) {
             val f = File(path)
-            if (f.exists() || f.mkdirs()) {
+            if ((f.isDirectory || f.mkdirs()) && f.isDirectory && f.canRead() && f.canWrite()) {
                 if (path != saved) application.prefs.update { it.copy(lastWorkspace = path) }
                 return path
             }
@@ -132,7 +140,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshEntries() {
         viewModelScope.launch {
-            val dir = File(ui.workspace)
+            val workspace = ui.workspace
+            val dir = File(workspace)
             val list = withContext(Dispatchers.IO) {
                 dir.listFiles()?.map {
                     FileEntry(
@@ -143,7 +152,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }?.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() })) ?: emptyList()
             }
-            ui = ui.copy(entries = list)
+            if (ui.workspace == workspace) ui = ui.copy(entries = list)
         }
     }
 
@@ -192,28 +201,45 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun openOrCreateSession() {
+    private suspend fun openOrCreateSession() {
         val lastId = application.prefs.settings.value.lastSessionId
-        val loaded = lastId?.let { store.load(it) }
+        val loaded = withContext(Dispatchers.IO) { lastId?.let { store.load(it) } }
+        if (ui.session != null) return
         if (loaded != null) {
-            ui = ui.copy(session = loaded, workspace = loaded.cwd)
+            val session = accessibleSession(loaded)
+            ui = ui.copy(session = session, workspace = session.cwd)
             refreshEntries()
         } else {
             newSession()
         }
     }
 
+    private fun accessibleSession(session: ChatSession): ChatSession {
+        val dir = File(session.cwd)
+        return if (dir.isDirectory && dir.canRead() && dir.canWrite()) session else session.copy(cwd = ui.workspace)
+    }
+
+    private fun sessionChangeBlocked(): Boolean {
+        if (!ui.busy) return false
+        ui = ui.copy(toast = "Сначала остановите текущую задачу")
+        return true
+    }
+
     fun newSession() {
+        if (sessionChangeBlocked()) return
         val session = ChatSession(cwd = ui.workspace)
         ui = ui.copy(session = session, todos = emptyList(), screen = Screen.CHAT)
         application.prefs.update { it.copy(lastSessionId = session.id) }
-        store.save(session)
+        if (!store.save(session)) ui = ui.copy(toast = "Не удалось сохранить сессию")
         refreshSessions()
     }
 
     fun openSession(id: String) {
+        if (sessionChangeBlocked()) return
         viewModelScope.launch {
-            val session = withContext(Dispatchers.IO) { store.load(id) } ?: return@launch
+            val loaded = withContext(Dispatchers.IO) { store.load(id) } ?: return@launch
+            if (sessionChangeBlocked()) return@launch
+            val session = accessibleSession(loaded)
             ui = ui.copy(session = session, workspace = session.cwd, screen = Screen.CHAT, todos = emptyList())
             application.prefs.update { it.copy(lastSessionId = id, lastWorkspace = session.cwd) }
             refreshEntries()
@@ -221,6 +247,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteSession(id: String) {
+        if (sessionChangeBlocked()) return
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.delete(id) }
             if (ui.session?.id == id) newSession()
@@ -230,7 +257,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun setSession(session: ChatSession) {
         ui = ui.copy(session = session)
-        store.save(session)
+        if (!store.save(session)) ui = ui.copy(toast = "Не удалось сохранить сессию")
         refreshSessions()
     }
 
@@ -260,6 +287,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         pendingOutput = StringBuilder()
         lastChunkFlush = 0L
         ui = ui.copy(busy = true, status = "Думаю…", screen = Screen.CHAT)
+        val runId = ++agentRunId
 
         job = viewModelScope.launch {
             try {
@@ -273,25 +301,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     maxIterations = settings.maxIterations,
                     systemAppend = settings.systemAppend,
                     streaming = settings.streaming,
-                    listener = agentListener
+                    listener = agentListener(runId, session.id)
                 )
             } catch (c: kotlinx.coroutines.CancellationException) {
                 ui = ui.copy(toast = "Остановлено")
             } finally {
+                updateMessages { messages ->
+                    messages.map { message ->
+                        when {
+                            message.streaming -> message.copy(streaming = false, content = message.content.ifBlank { "Остановлено." })
+                            message.role == Role.TOOL && message.toolOk == null -> message.copy(
+                                toolOk = false,
+                                content = "Выполнение прервано. Проверьте состояние файлов перед повтором."
+                            )
+                            else -> message
+                        }
+                    }
+                }
                 ui = ui.copy(busy = false, status = "", approval = null)
-                ui.session?.let { store.save(it) }
+                ui.session?.let { if (!store.save(it)) ui = ui.copy(toast = "Не удалось сохранить сессию") }
                 refreshSessions()
             }
         }
     }
 
     fun stop() {
+        if (!ui.busy) return
         engine.cancel()
         approvalDeferred?.complete(false)
         approvalDeferred = null
         job?.cancel()
-        job = null
-        ui = ui.copy(busy = false, status = "", approval = null)
+        // Keep the UI busy until the coroutine's cleanup has finished.
+        ui = ui.copy(status = "Останавливаю…", approval = null)
     }
 
     fun approve(allow: Boolean) {
@@ -319,18 +360,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private val agentListener = object : AgentEngine.Listener {
+    private fun isActiveRun(runId: Long, sessionId: String): Boolean =
+        runId == agentRunId && ui.busy && ui.session?.id == sessionId
 
-        override fun onStatus(text: String) {
+    private fun dispatchAgentEvent(runId: Long, sessionId: String, action: () -> Unit) {
+        val guarded = { if (isActiveRun(runId, sessionId)) action() }
+        if (Looper.myLooper() == Looper.getMainLooper()) guarded() else mainHandler.post { guarded() }
+    }
+
+    private fun agentListener(runId: Long, sessionId: String) = object : AgentEngine.Listener {
+        override fun onStatus(text: String) = dispatchAgentEvent(runId, sessionId) {
             ui = ui.copy(status = text)
         }
 
-        override fun onAssistantStart() {
+        override fun onAssistantStart() = dispatchAgentEvent(runId, sessionId) {
             pendingOutput = StringBuilder()
             appendMessage(ChatMessage(role = Role.ASSISTANT, content = "", streaming = true))
         }
 
-        override fun onAssistantDelta(text: String) {
+        override fun onAssistantDelta(text: String) = dispatchAgentEvent(runId, sessionId) {
             updateMessages { list ->
                 val idx = list.indexOfLast { it.role == Role.ASSISTANT && it.streaming }
                 if (idx < 0) list else list.toMutableList().also {
@@ -339,64 +387,59 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
-        override fun onAssistantDone(message: ChatMessage) {
+        override fun onAssistantDone(message: ChatMessage) = dispatchAgentEvent(runId, sessionId) {
             updateMessages { list ->
                 val idx = list.indexOfLast { it.role == Role.ASSISTANT && it.streaming }
-                if (idx < 0) {
-                    list + message
-                } else {
-                    list.toMutableList().also {
-                        it[idx] = message.copy(id = it[idx].id, streaming = false, ts = it[idx].ts)
-                    }
+                if (idx < 0) list + message else list.toMutableList().also {
+                    it[idx] = message.copy(id = it[idx].id, streaming = false, ts = it[idx].ts)
                 }
             }
         }
 
-        override fun onToolStart(call: ToolCallRef) {
+        override fun onToolStart(call: ToolCallRef) = dispatchAgentEvent(runId, sessionId) {
             pendingOutput = StringBuilder()
             lastChunkFlush = 0L
-            appendMessage(
-                ChatMessage(
-                    role = Role.TOOL,
-                    content = "⏳ выполняется…",
-                    toolCallId = call.id,
-                    toolName = call.name,
-                    toolArgs = call.arguments,
-                    toolOk = null
-                )
-            )
+            appendMessage(ChatMessage(
+                role = Role.TOOL,
+                content = "⏳ выполняется…",
+                toolCallId = call.id,
+                toolName = call.name,
+                toolArgs = call.arguments,
+                toolOk = null
+            ))
         }
 
-        override fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String) {
+        override fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String) = dispatchAgentEvent(runId, sessionId) {
             updateToolMessage(call.id, ok, output.ifBlank { "(нет вывода)" })
             pendingOutput = StringBuilder()
         }
 
-        override fun onTodo(items: List<TodoItem>) {
+        override fun onTodo(items: List<TodoItem>) = dispatchAgentEvent(runId, sessionId) {
             ui = ui.copy(todos = items)
         }
 
-        override fun onCommandOutputChunk(chunk: String) {
-            val now = System.currentTimeMillis()
-            pendingOutput.append(chunk)
-            if (now - lastChunkFlush < 250) return
-            lastChunkFlush = now
-            val tail = pendingOutput.toString().takeLast(4000)
+        override fun onCommandOutputChunk(chunk: String) = dispatchAgentEvent(runId, sessionId) {
             val callId = ui.session?.messages?.lastOrNull { it.role == Role.TOOL && it.toolOk == null }?.toolCallId
-            if (callId != null) updateToolMessage(callId, null, tail)
+            if (callId != null) {
+                pendingOutput.append(chunk)
+                val now = System.currentTimeMillis()
+                if (now - lastChunkFlush >= 250) {
+                    lastChunkFlush = now
+                    updateToolMessage(callId, null, pendingOutput.toString().takeLast(4000))
+                }
+            }
         }
 
         override suspend fun approve(call: ToolCallRef): Boolean {
+            if (!isActiveRun(runId, sessionId)) return false
             val deferred = CompletableDeferred<Boolean>()
             approvalDeferred = deferred
-            withContext(Dispatchers.Main) {
-                ui = ui.copy(approval = PendingApproval(call), status = "Жду подтверждения: ${call.name}")
-            }
+            ui = ui.copy(approval = PendingApproval(call), status = "Жду подтверждения: ${call.name}")
             return try {
                 deferred.await()
             } finally {
-                approvalDeferred = null
-                withContext(Dispatchers.Main) { ui = ui.copy(approval = null, status = "Выполняю…") }
+                if (approvalDeferred === deferred) approvalDeferred = null
+                if (isActiveRun(runId, sessionId)) ui = ui.copy(approval = null, status = "Выполняю…")
             }
         }
     }
@@ -404,7 +447,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- настройки ----------
 
     fun saveSettings(transform: (AppSettings) -> AppSettings) {
+        val wasRootAllowed = application.prefs.settings.value.allowRoot
         application.prefs.update(transform)
+        val rootAllowed = application.prefs.settings.value.allowRoot
+        if (!wasRootAllowed && rootAllowed) checkRoot(true)
     }
 
     fun addProvider(provider: Provider) {
@@ -470,7 +516,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openFile(path: String) {
         viewModelScope.launch {
-            val text = withContext(Dispatchers.IO) { Shell.readText(path) }
+            val allowRoot = ui.settings.allowRoot
+            val text = withContext(Dispatchers.IO) { Shell.readText(path, allowRoot = allowRoot) }
             if (text == null) {
                 ui = ui.copy(toast = "Не удалось открыть файл: $path")
                 return@launch
@@ -485,9 +532,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveEditor() {
         val path = ui.editorPath ?: return
+        val text = ui.editorText
+        val allowRoot = ui.settings.allowRoot
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { Shell.writeText(path, ui.editorText) }
-            ui = ui.copy(editorDirty = false, toast = if (ok) "Сохранено: $path" else "Ошибка сохранения")
+            val ok = withContext(Dispatchers.IO) { Shell.writeText(path, text, allowRoot = allowRoot) }
+            val clean = ok && ui.editorPath == path && ui.editorText == text
+            ui = ui.copy(editorDirty = if (clean) false else ui.editorDirty, toast = if (ok) "Сохранено: $path" else "Ошибка сохранения")
             refreshEntries()
         }
     }

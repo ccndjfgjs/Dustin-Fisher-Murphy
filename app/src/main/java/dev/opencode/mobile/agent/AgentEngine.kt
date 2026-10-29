@@ -4,7 +4,6 @@ import dev.opencode.mobile.ai.AiClient
 import dev.opencode.mobile.ai.AiClients
 import dev.opencode.mobile.ai.AiMessage
 import dev.opencode.mobile.ai.AiRequest
-import dev.opencode.mobile.ai.AiToolCall
 import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.Role
@@ -51,13 +50,13 @@ class AgentEngine {
         streaming: Boolean,
         listener: Listener
     ) {
-        val ai = AiClients.create(provider)
-        client = ai
         try {
+            val ai = AiClients.create(provider)
+            client = ai
             val useRoot = canUseRoot && withContext(Dispatchers.IO) { Shell.rootAvailable() }
             val system = withContext(Dispatchers.IO) { buildSystemPrompt(cwd, useRoot, systemAppend) }
             val messages = mutableListOf<AiMessage>()
-            messages.addAll(toAiMessages(trimHistory(history)))
+            messages.addAll(HistoryAdapter.toAiMessages(trimHistory(history)))
             var iterations = maxIterations.coerceIn(1, 100)
             while (iterations-- > 0) {
                 listener.onStatus("Думаю…")
@@ -71,7 +70,9 @@ class AgentEngine {
                     maxTokens = 8192,
                     stream = streaming
                 )
-                val response = ai.complete(request) { delta -> listener.onAssistantDelta(delta) }
+                val response = ai.complete(request) { delta ->
+                    withContext(Dispatchers.Main.immediate) { listener.onAssistantDelta(delta) }
+                }
 
                 val assistantMsg = ChatMessage(
                     role = Role.ASSISTANT,
@@ -169,36 +170,8 @@ class AgentEngine {
         return if (start >= history.size) history.takeLast(40) else history.subList(start, history.size).toList()
     }
 
-    private fun toAiMessages(history: List<ChatMessage>): List<AiMessage> {
-        val out = mutableListOf<AiMessage>()
-        for (m in history) {
-            when (m.role) {
-                Role.USER -> out.add(AiMessage(role = "user", content = m.content))
-                Role.ASSISTANT -> {
-                    if (m.toolCalls.isEmpty() && m.content.isBlank()) continue
-                    out.add(
-                        AiMessage(
-                            role = "assistant",
-                            content = m.content,
-                            toolCalls = m.toolCalls.map { AiToolCall(it.id, it.name, it.arguments) }
-                        )
-                    )
-                }
-                Role.TOOL -> out.add(
-                    AiMessage(
-                        role = "tool",
-                        content = clamp(m.content, 16000),
-                        toolCallId = m.toolCallId,
-                        toolName = m.toolName
-                    )
-                )
-            }
-        }
-        return out
-    }
-
     private fun buildSystemPrompt(cwd: String, useRoot: Boolean, append: String): String {
-        val rootStatus = Shell.rootStatus()
+        val rootStatus = if (useRoot) Shell.rootStatus() else dev.opencode.mobile.shell.RootStatus(false)
         val sb = StringBuilder()
         sb.append(
             """

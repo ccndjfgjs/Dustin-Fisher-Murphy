@@ -1,45 +1,67 @@
 package dev.opencode.mobile.data
 
 import android.content.Context
+import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 
-/** Хранилище сессий: по одному JSON-файлу на сессию в filesDir/sessions. */
+/** One atomically replaced JSON file per session. */
 class SessionStore(context: Context) {
-
     private val dir: File = File(context.filesDir, "sessions").apply { mkdirs() }
+    private val lock = Any()
 
-    fun list(): List<SessionSummary> = dir.listFiles { f -> f.name.endsWith(".json") }
-        ?.mapNotNull { f ->
-            runCatching {
-                val o = JSONObject(f.readText())
-                SessionSummary(
-                    id = o.optString("id", f.nameWithoutExtension),
-                    title = o.optString("title", "Сессия"),
-                    cwd = o.optString("cwd", "/sdcard"),
-                    updatedAt = o.optLong("updatedAt", f.lastModified())
-                )
-            }.getOrNull()
-        }
-        ?.sortedByDescending { it.updatedAt }
-        ?: emptyList()
+    private fun file(id: String): File? =
+        if (id.matches(Regex("[A-Za-z0-9_-]{1,128}"))) File(dir, "$id.json") else null
 
-    fun load(id: String): ChatSession? = runCatching {
-        val f = File(dir, "$id.json")
-        if (!f.exists()) null else ChatSession.fromJson(JSONObject(f.readText()))
-    }.getOrNull()
+    fun list(): List<SessionSummary> = synchronized(lock) {
+        dir.listFiles { f -> f.name.endsWith(".json") }
+            ?.mapNotNull { f ->
+                runCatching {
+                    val o = JSONObject(String(AtomicFile(f).readFully(), Charsets.UTF_8))
+                    val id = o.optString("id", f.nameWithoutExtension)
+                    if (file(id) == null) return@runCatching null
+                    SessionSummary(
+                        id = id,
+                        title = o.optString("title", "Сессия"),
+                        cwd = o.optString("cwd", "/sdcard"),
+                        updatedAt = o.optLong("updatedAt", f.lastModified())
+                    )
+                }.getOrNull()
+            }
+            ?.sortedByDescending { it.updatedAt }
+            ?: emptyList()
+    }
 
-    fun save(session: ChatSession) {
+    fun load(id: String): ChatSession? = synchronized(lock) {
         runCatching {
-            File(dir, "${session.id}.json").writeText(session.toJson().toString())
+            val f = file(id) ?: return@runCatching null
+            if (!f.exists() && !File(f.path + ".bak").exists()) return@runCatching null
+            val session = ChatSession.fromJson(JSONObject(String(AtomicFile(f).readFully(), Charsets.UTF_8)))
+            if (session.id == id) session else null
+        }.getOrNull()
+    }
+
+    fun save(session: ChatSession): Boolean = synchronized(lock) {
+        val f = file(session.id) ?: return@synchronized false
+        val atomic = AtomicFile(f)
+        var stream: FileOutputStream? = null
+        try {
+            stream = atomic.startWrite()
+            stream.write(session.toJson().toString().toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(stream)
+            true
+        } catch (_: Exception) {
+            if (stream != null) atomic.failWrite(stream)
+            false
         }
     }
 
-    fun delete(id: String) {
-        runCatching { File(dir, "$id.json").delete() }
+    fun delete(id: String) = synchronized(lock) {
+        file(id)?.let { AtomicFile(it).delete() }
     }
 
-    fun clearAll() {
+    fun clearAll() = synchronized(lock) {
         dir.listFiles()?.forEach { it.delete() }
     }
 }

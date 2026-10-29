@@ -1,10 +1,15 @@
 package dev.opencode.mobile.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -62,8 +67,12 @@ fun AppRoot(vm: AppViewModel) {
 
     var storageAsked by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
-    val needsStorage = Build.VERSION.SDK_INT >= 30 &&
+    val needsStorage = if (Build.VERSION.SDK_INT >= 30) {
         !Environment.isExternalStorageManager()
+    } else {
+        ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+    }
+    val storagePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -94,6 +103,19 @@ fun AppRoot(vm: AppViewModel) {
                 Screen.SETTINGS -> SettingsScreen(vm)
                 Screen.EDITOR -> EditorScreen(vm)
             }
+        }
+    }
+
+    val storageError = ui.storageError
+    if (storageError != null) {
+        var dismissed by rememberSaveable(storageError) { mutableStateOf(false) }
+        if (!dismissed) {
+            AlertDialog(
+                onDismissRequest = { dismissed = true },
+                title = { Text("Ошибка защиты настроек") },
+                text = { Text(storageError) },
+                confirmButton = { TextButton(onClick = { dismissed = true }) { Text("Понятно") } }
+            )
         }
     }
 
@@ -134,11 +156,17 @@ fun AppRoot(vm: AppViewModel) {
             confirmButton = {
                 TextButton(onClick = {
                     storageAsked = true
-                    val intent = Intent(
-                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                        Uri.parse("package:${context.packageName}")
-                    )
-                    runCatching { context.startActivity(intent) }
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        if (runCatching { context.startActivity(intent) }.isFailure) {
+                            runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                        }
+                    } else {
+                        storagePermission.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+                    }
                 }) { Text("Разрешить") }
             },
             dismissButton = {
