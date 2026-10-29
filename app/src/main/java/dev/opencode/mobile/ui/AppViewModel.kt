@@ -1,6 +1,7 @@
 package dev.opencode.mobile.ui
 
 import android.app.Application
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -11,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import dev.opencode.mobile.OpenCodeApp
 import dev.opencode.mobile.agent.AgentEngine
 import dev.opencode.mobile.data.AppSettings
+import dev.opencode.mobile.data.ChatExport
 import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.ChatSession
 import dev.opencode.mobile.data.FileEntry
@@ -25,6 +27,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -42,6 +45,7 @@ data class UiState(
     val workspace: String = "/sdcard",
     val entries: List<FileEntry> = emptyList(),
     val sessions: List<SessionSummary> = emptyList(),
+    val sessionQuery: String = "",
     val session: ChatSession? = null,
     val chatDraft: String = "",
     val busy: Boolean = false,
@@ -75,6 +79,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var job: Job? = null
+    private var sessionSearchJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
     private var pendingOutput = StringBuilder()
     private var lastChunkFlush = 0L
@@ -202,10 +207,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- сессии ----------
 
-    fun refreshSessions() {
+    fun refreshSessions() = searchSessions(ui.sessionQuery, debounce = false)
+
+    fun searchSessions(query: String, debounce: Boolean = true) {
+        ui = ui.copy(sessionQuery = query)
+        sessionSearchJob?.cancel()
+        sessionSearchJob = viewModelScope.launch {
+            if (debounce) delay(200)
+            val list = withContext(Dispatchers.IO) { store.search(query) }
+            if (ui.sessionQuery == query) ui = ui.copy(sessions = list)
+        }
+    }
+
+    fun renameSession(id: String, title: String) {
+        if (sessionChangeBlocked()) return
+        val clean = title.replace(Regex("[\\r\\n\\p{Cntrl}]"), " ").trim().take(120)
+        if (clean.isBlank()) { ui = ui.copy(toast = "Название не может быть пустым"); return }
+        // Serialize with the existing main-thread session writes, so a rename cannot overwrite a new message.
+        val original = ui.session?.takeIf { it.id == id } ?: store.load(id)
+        if (original == null) { ui = ui.copy(toast = "Чат не найден"); return }
+        val renamed = original.copy(title = clean, titleManuallySet = true, updatedAt = System.currentTimeMillis())
+        if (!store.save(renamed)) { ui = ui.copy(toast = "Не удалось сохранить название"); return }
+        if (ui.session?.id == id) ui = ui.copy(session = renamed)
+        refreshSessions()
+    }
+
+    fun exportSession(id: String, uri: Uri) {
+        if (sessionChangeBlocked()) return
+        val current = ui.session?.takeIf { it.id == id }
         viewModelScope.launch {
-            val list = withContext(Dispatchers.IO) { store.list() }
-            ui = ui.copy(sessions = list)
+            val success = withContext(Dispatchers.IO) {
+                runCatching {
+                    val session = current ?: store.load(id) ?: error("Чат не найден")
+                    application.contentResolver.openOutputStream(uri, "wt")?.use { stream ->
+                        stream.write(ChatExport.markdown(session).toByteArray(Charsets.UTF_8))
+                    } ?: error("Не удалось открыть файл")
+                }.isSuccess
+            }
+            ui = ui.copy(toast = if (success) "Чат экспортирован" else "Не удалось экспортировать чат")
         }
     }
 
@@ -290,7 +329,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val text = raw.trim()
         if (text.isEmpty() || ui.busy) return
         var session = ui.session ?: ChatSession(cwd = ui.workspace)
-        if (session.messages.none { it.role == Role.USER }) {
+        if (!session.titleManuallySet && session.messages.none { it.role == Role.USER }) {
             session = session.copy(title = text.take(48).replace('\n', ' '))
         }
         val userMsg = ChatMessage(role = Role.USER, content = text)

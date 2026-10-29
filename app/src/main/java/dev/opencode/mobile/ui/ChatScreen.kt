@@ -1,6 +1,8 @@
 package dev.opencode.mobile.ui
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -45,6 +47,8 @@ import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FileUpload
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Terminal
@@ -58,6 +62,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -67,6 +72,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -115,6 +121,12 @@ fun ChatScreen(vm: AppViewModel) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var showSessions by remember { mutableStateOf(false) }
+    var exportId by rememberSaveable { mutableStateOf<String?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
+        val id = exportId
+        exportId = null
+        if (uri != null && id != null) vm.exportSession(id, uri)
+    }
     var showModels by remember { mutableStateOf(false) }
     var followLatest by remember(session?.id) { mutableStateOf(true) }
     var autoScrolling by remember(session?.id) { mutableStateOf(false) }
@@ -294,12 +306,16 @@ fun ChatScreen(vm: AppViewModel) {
     if (showSessions) {
         SessionsSheet(
             sessions = ui.sessions,
+            query = ui.sessionQuery,
             activeId = session?.id,
             busy = ui.busy,
             formatTime = vm::formatTime,
+            onQuery = { vm.searchSessions(it) },
             onDismiss = { showSessions = false },
             onNew = { vm.newSession(); showSessions = false },
             onOpen = { vm.openSession(it); showSessions = false },
+            onRename = vm::renameSession,
+            onExport = { id -> exportId = id; exportLauncher.launch("chat-${id.take(8)}.md") },
             onDelete = vm::deleteSession
         )
     }
@@ -734,27 +750,39 @@ internal fun ChatComposer(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SessionsSheet(
+internal fun SessionsSheet(
     sessions: List<SessionSummary>,
+    query: String,
     activeId: String?,
     busy: Boolean,
     formatTime: (Long) -> String,
+    onQuery: (String) -> Unit,
     onDismiss: () -> Unit,
     onNew: () -> Unit,
     onOpen: (String) -> Unit,
+    onRename: (String, String) -> Unit,
+    onExport: (String) -> Unit,
     onDelete: (String) -> Unit
 ) {
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
+    var pendingRename by remember { mutableStateOf<SessionSummary?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var pendingExport by remember { mutableStateOf<SessionSummary?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = DesignTokens.chatPanel) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
             Text("История чатов", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text(if (busy) "Сначала остановите текущую задачу" else "Ваши диалоги на этом устройстве", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
+            OutlinedTextField(
+                value = query, onValueChange = onQuery, singleLine = true,
+                label = { Text("Поиск по истории") },
+                modifier = Modifier.fillMaxWidth().testTag("session-search")
+            )
             TextButton(onClick = onNew, enabled = !busy) {
                 Icon(Icons.Default.Add, null, Modifier.size(18.dp))
                 Text("  Новый чат")
             }
             if (sessions.isEmpty()) {
-                Text("Пока нет сохранённых чатов", color = Muted, modifier = Modifier.padding(vertical = 24.dp))
+                Text(if (query.isBlank()) "Пока нет сохранённых чатов" else "Ничего не найдено", color = Muted, modifier = Modifier.padding(vertical = 24.dp))
             } else {
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 400.dp), contentPadding = PaddingValues(bottom = 18.dp)) {
                     items(sessions, key = { it.id }) { session ->
@@ -768,6 +796,12 @@ private fun SessionsSheet(
                                 Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                                 Text(formatTime(session.updatedAt), color = Muted, fontSize = 11.sp)
                             }
+                            IconButton(onClick = { pendingRename = session; renameText = session.title }, enabled = !busy) {
+                                Icon(Icons.Outlined.Edit, "Переименовать чат ${session.title}", modifier = Modifier.size(20.dp))
+                            }
+                            IconButton(onClick = { pendingExport = session }, enabled = !busy) {
+                                Icon(Icons.Outlined.FileUpload, "Экспортировать чат ${session.title}", modifier = Modifier.size(20.dp))
+                            }
                             IconButton(onClick = { pendingDelete = session }, enabled = !busy) {
                                 Icon(Icons.Outlined.DeleteOutline, "Удалить чат ${session.title}", tint = if (busy) Muted else Danger, modifier = Modifier.size(20.dp))
                             }
@@ -776,6 +810,27 @@ private fun SessionsSheet(
                 }
             }
         }
+    }
+    pendingRename?.let { session ->
+        AlertDialog(
+            onDismissRequest = { pendingRename = null },
+            title = { Text("Переименовать чат") },
+            text = {
+                OutlinedTextField(value = renameText, onValueChange = { renameText = it.take(120) }, singleLine = true,
+                    label = { Text("Название") }, modifier = Modifier.testTag("session-rename"))
+            },
+            confirmButton = { TextButton(onClick = { onRename(session.id, renameText); pendingRename = null }, enabled = renameText.isNotBlank()) { Text("Сохранить") } },
+            dismissButton = { TextButton(onClick = { pendingRename = null }) { Text("Отмена") } }
+        )
+    }
+    pendingExport?.let { session ->
+        AlertDialog(
+            onDismissRequest = { pendingExport = null },
+            title = { Text("Экспортировать чат?") },
+            text = { Text("Markdown-файл содержит сообщения, рассуждения и результаты инструментов. В них могут быть секреты. Выберите безопасное место для сохранения.") },
+            confirmButton = { TextButton(onClick = { onExport(session.id); pendingExport = null }) { Text("Выбрать файл") } },
+            dismissButton = { TextButton(onClick = { pendingExport = null }) { Text("Отмена") } }
+        )
     }
     pendingDelete?.let { session ->
         AlertDialog(

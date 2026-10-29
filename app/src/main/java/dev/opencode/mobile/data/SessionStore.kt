@@ -33,6 +33,20 @@ class SessionStore(context: Context) {
             ?: emptyList()
     }
 
+    /** Search titles, workspaces and stored message text locally; never sends queries to a server. */
+    fun search(query: String): List<SessionSummary> {
+        val needle = query.trim()
+        val summaries = list()
+        if (needle.isEmpty()) return summaries
+        return summaries.filter { summary ->
+            summary.title.contains(needle, ignoreCase = true) || summary.cwd.contains(needle, ignoreCase = true) ||
+                load(summary.id)?.messages?.any { message ->
+                    message.content.contains(needle, ignoreCase = true) ||
+                        message.reasoning.contains(needle, ignoreCase = true)
+                } == true
+        }
+    }
+
     fun load(id: String): ChatSession? = synchronized(lock) {
         runCatching {
             val f = file(id) ?: return@runCatching null

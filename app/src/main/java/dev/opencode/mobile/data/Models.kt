@@ -123,6 +123,7 @@ data class ChatMessage(
 data class ChatSession(
     val id: String = UUID.randomUUID().toString(),
     val title: String = "Новая сессия",
+    val titleManuallySet: Boolean = false,
     val cwd: String,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
@@ -132,6 +133,7 @@ data class ChatSession(
         val o = JSONObject()
         o.put("id", id)
         o.put("title", title)
+        if (titleManuallySet) o.put("titleManuallySet", true)
         o.put("cwd", cwd)
         o.put("createdAt", createdAt)
         o.put("updatedAt", updatedAt)
@@ -151,6 +153,7 @@ data class ChatSession(
             return ChatSession(
                 id = o.optString("id", UUID.randomUUID().toString()),
                 title = o.optString("title", "Сессия"),
+                titleManuallySet = o.optBoolean("titleManuallySet", false),
                 cwd = o.optString("cwd", "/sdcard"),
                 createdAt = ms,
                 updatedAt = o.optLong("updatedAt", ms),

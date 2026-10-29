@@ -4,7 +4,9 @@ import android.content.Context
 import android.system.Os
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import dev.opencode.mobile.data.ChatMessage
 import dev.opencode.mobile.data.ChatSession
+import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionStore
 import dev.opencode.mobile.shell.Shell
 import dev.opencode.mobile.tools.ToolContext
@@ -47,6 +49,20 @@ class RuntimeSafetyTest {
         } finally {
             Shell.delete(base.absolutePath, recursive = true)
         }
+    }
+
+    @Test fun sessionSearchIncludesMessageHistoryAndManualTitleRoundTrips() {
+        val store = SessionStore(context)
+        val token = UUID.randomUUID().toString()
+        val session = ChatSession(title = "Название $token", titleManuallySet = true, cwd = context.filesDir.absolutePath,
+            messages = listOf(ChatMessage(role = Role.USER, content = "Секретный фрагмент $token")))
+        try {
+            assertTrue(store.save(session))
+            assertTrue(store.load(session.id)!!.titleManuallySet)
+            assertTrue(store.search("фрагмент $token").any { it.id == session.id })
+            assertTrue(store.search("НАЗВАНИЕ $token").any { it.id == session.id })
+            assertFalse(store.search("нет-$token").any { it.id == session.id })
+        } finally { store.delete(session.id) }
     }
 
     @Test fun sessionsRoundTripAndRejectUnsafeIds() {
