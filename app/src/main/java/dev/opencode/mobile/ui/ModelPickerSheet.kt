@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -57,7 +58,7 @@ internal fun ModelPickerSheet(
             else provider.models.filter { it.contains(search, ignoreCase = true) }
         if (models.isEmpty()) null else provider to models
     }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Color(0xFF1A1E28)) {
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = Color(0xFF1A1E28)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
             Text("Выбор модели", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text(

@@ -569,7 +569,7 @@ private fun SessionsSheet(
     onDelete: (String) -> Unit
 ) {
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = ChatPanel) {
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = ChatPanel) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
             Text("История чатов", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text(if (busy) "Сначала остановите текущую задачу" else "Ваши диалоги на этом устройстве", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))

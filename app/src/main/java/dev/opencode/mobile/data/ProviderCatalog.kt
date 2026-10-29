@@ -35,6 +35,23 @@ object ProviderCatalog {
             note = "Ключ Model Studio и оплата по использованию. Регион ключа должен совпадать с адресом. Для другого региона или workspace измените Base URL."
         ),
         ProviderPreset(
+            id = "alibaba-studio-us",
+            name = "Alibaba Cloud · Model Studio (США)",
+            description = "Virginia · оплата по использованию",
+            baseUrl = "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+            model = "qwen3-coder-plus",
+            extraModels = listOf("qwen3-coder-flash"),
+            note = "Ключ Model Studio для региона US (Virginia); запросы оплачиваются по использованию. Регион ключа должен совпадать с адресом."
+        ),
+        ProviderPreset(
+            id = "alibaba-studio-eu",
+            name = "Alibaba Cloud · Model Studio (Европа)",
+            description = "Frankfurt · нужен ID workspace",
+            baseUrl = "https://{WorkspaceId}.eu-central-1.maas.aliyuncs.com/compatible-mode/v1",
+            model = "qwen3-coder-next",
+            note = "Замените {WorkspaceId} в Base URL на ID вашего workspace во Frankfurt. Нужен ключ этого workspace; запросы оплачиваются по использованию."
+        ),
+        ProviderPreset(
             id = "alibaba-studio-cn",
             name = "Alibaba Cloud · Model Studio (Китай)",
             description = "Beijing · оплата по использованию",

@@ -9,6 +9,8 @@
 | Шаблон | Base URL | Ключ и тарификация |
 |---|---|---|
 | Model Studio, Singapore | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | Model Studio API key; оплата по использованию |
+| Model Studio, US (Virginia) | `https://dashscope-us.aliyuncs.com/compatible-mode/v1` | Model Studio API key для региона US; оплата по использованию |
+| Model Studio, Germany (Frankfurt) | `https://{WorkspaceId}.eu-central-1.maas.aliyuncs.com/compatible-mode/v1` | Замените `{WorkspaceId}` на реальный ID workspace и используйте ключ этого workspace; оплата по использованию |
 | Model Studio, Beijing | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Model Studio API key для соответствующего региона; оплата по использованию |
 | Coding Plan, международный | `https://coding-intl.dashscope.aliyuncs.com/v1` | отдельный ключ и подписка Coding Plan |
 | Coding Plan, Китай | `https://coding.dashscope.aliyuncs.com/v1` | ключ Coding Plan (`sk-sp-…`) и отдельная подписка |

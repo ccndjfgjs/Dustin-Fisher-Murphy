@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -49,7 +50,7 @@ internal fun ProviderCatalogSheet(
 ) {
     var query by remember { mutableStateOf("") }
     val presets = remember(query) { ProviderCatalog.search(query) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Color(0xFF1A1E28)) {
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = Color(0xFF1A1E28)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
             Text("Добавить провайдера", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text("Выберите шаблон или настройте свой. Сохранённые ключи не изменятся.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 5.dp, bottom = 12.dp))

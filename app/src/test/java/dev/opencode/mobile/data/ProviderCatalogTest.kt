@@ -11,10 +11,12 @@ class ProviderCatalogTest {
         val presets = ProviderCatalog.presets
         assertEquals(presets.size, presets.map { it.id }.distinct().size)
         val alibaba = presets.filter { it.id.startsWith("alibaba-") }
-        assertEquals(4, alibaba.size)
+        assertEquals(6, alibaba.size)
         assertEquals(
             setOf(
                 "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+                "https://{WorkspaceId}.eu-central-1.maas.aliyuncs.com/compatible-mode/v1",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "https://coding-intl.dashscope.aliyuncs.com/v1",
                 "https://coding.dashscope.aliyuncs.com/v1"
@@ -26,7 +28,7 @@ class ProviderCatalogTest {
     }
 
     @Test fun catalogSearchAndNewInstancesDoNotReuseCredentialsOrIds() {
-        assertEquals(4, ProviderCatalog.search("ALIBABA cloud").size)
+        assertEquals(6, ProviderCatalog.search("ALIBABA cloud").size)
         assertEquals("deepseek", ProviderCatalog.search("DEEPSEEK-FLASH").single().id)
         assertTrue(ProviderCatalog.search("does-not-exist").isEmpty())
         val preset = ProviderCatalog.presets.first()

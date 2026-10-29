@@ -10,6 +10,7 @@ import java.util.Locale
 internal object ProviderRequestPolicy {
     private val alibabaHosts = setOf(
         "dashscope-intl.aliyuncs.com",
+        "dashscope-us.aliyuncs.com",
         "dashscope.aliyuncs.com",
         "coding-intl.dashscope.aliyuncs.com",
         "coding.dashscope.aliyuncs.com"
