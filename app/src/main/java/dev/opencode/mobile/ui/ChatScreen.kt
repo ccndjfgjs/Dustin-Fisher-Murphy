@@ -74,6 +74,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -101,6 +102,7 @@ private val ChatOutline = Color(0xFF303747)
 @Composable
 fun ChatScreen(vm: AppViewModel) {
     val ui = vm.ui
+    val focusManager = LocalFocusManager.current
     val session = ui.session
     // Empty assistant tool-call envelopes are represented by the tool cards themselves.
     val messages = session?.messages.orEmpty().filterNot {
@@ -253,7 +255,7 @@ fun ChatScreen(vm: AppViewModel) {
             onValueChange = vm::updateChatDraft,
             provider = ui.settings.activeProvider,
             busy = ui.busy,
-            onModelClick = { showModels = true },
+            onModelClick = { focusManager.clearFocus(); showModels = true },
             onSend = {
                 if (ui.chatDraft.isNotBlank() && !ui.busy) {
                     followLatest = true
@@ -430,13 +432,13 @@ private fun MessageItem(message: ChatMessage, vm: AppViewModel, onExpandTool: ()
                 )
             }
         }
-        Role.ASSISTANT -> AssistantMessage(message)
+        Role.ASSISTANT -> AssistantMessage(message, onSettings = { vm.navigate(Screen.SETTINGS) })
         Role.TOOL -> ToolCard(message, vm, onExpandTool)
     }
 }
 
 @Composable
-private fun AssistantMessage(message: ChatMessage) {
+internal fun AssistantMessage(message: ChatMessage, onSettings: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     Column(Modifier.fillMaxWidth()) {
@@ -465,6 +467,9 @@ private fun AssistantMessage(message: ChatMessage) {
             Text("Запускаю инструменты…", color = Muted, fontSize = 12.sp)
         } else {
             Text("Модель не вернула текст.", color = Muted, fontSize = 12.sp)
+        }
+        if (message.errorStatus == 401) {
+            TextButton(onClick = onSettings) { Text("Открыть настройки") }
         }
     }
 }
@@ -499,11 +504,11 @@ private fun ToolCard(message: ChatMessage, vm: AppViewModel, onExpand: () -> Uni
             Icon(if (message.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (message.expanded) "Свернуть результат" else "Развернуть результат", tint = Muted, modifier = Modifier.size(20.dp))
         }
         if (message.expanded) {
-            Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
-                Text(message.toolName.orEmpty(), color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                if (args.isNotBlank()) Text(args, color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
-                if (message.content.isNotBlank()) {
-                    SelectionContainer {
+            SelectionContainer {
+                Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
+                    Text(message.toolName.orEmpty(), color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    if (args.isNotBlank()) Text(args, color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
+                    if (message.content.isNotBlank()) {
                         Text(
                             message.content, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 11.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace,

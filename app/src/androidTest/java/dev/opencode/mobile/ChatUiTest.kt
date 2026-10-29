@@ -97,8 +97,11 @@ class ChatUiTest {
 
     @Test fun draftSurvivesOpeningCatalogAndReturningToChat() {
         dismissStoragePrompt()
+        // Avoid a late initial session load racing with opening the picker.
+        rule.onNodeWithContentDescription("Новый чат").performClick()
         rule.onNodeWithTag("chat-input").performTextInput("Мой черновик")
         rule.onNodeWithContentDescription("Выбрать модель").performClick()
+        rule.waitUntil(10_000) { rule.onAllNodesWithText("Добавить или настроить провайдера").fetchSemanticsNodes().isNotEmpty() }
         rule.onNodeWithText("Добавить или настроить провайдера").performClick()
         rule.onNodeWithTag("provider-search").performTextInput("Alibaba Cloud Coding")
         rule.onNodeWithText("Alibaba Cloud · Coding Plan").assertIsDisplayed().performClick()

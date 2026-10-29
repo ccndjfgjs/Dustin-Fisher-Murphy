@@ -15,7 +15,7 @@ internal object HistoryAdapter {
             when (message.role) {
                 Role.USER -> out.add(AiMessage(role = "user", content = message.content))
                 Role.ASSISTANT -> {
-                    if (message.toolCalls.isEmpty() && message.content.isBlank()) {
+                    if (message.errorStatus != null || (message.toolCalls.isEmpty() && message.content.isBlank())) {
                         index++
                         continue
                     }

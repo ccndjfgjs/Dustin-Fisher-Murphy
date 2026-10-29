@@ -27,8 +27,11 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -43,11 +46,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.opencode.mobile.ai.ProviderUrlPolicy
@@ -384,7 +389,7 @@ private fun RootSettingsCard(vm: AppViewModel) {
 }
 
 @Composable
-private fun ProviderDialog(
+internal fun ProviderDialog(
     provider: Provider?,
     isNew: Boolean,
     note: String = "",
@@ -394,8 +399,11 @@ private fun ProviderDialog(
     var name by remember(provider?.id) { mutableStateOf(provider?.name ?: "") }
     var baseUrl by remember(provider?.id) { mutableStateOf(provider?.baseUrl ?: "https://api.openai.com/v1") }
     var apiKey by remember(provider?.id) { mutableStateOf(provider?.apiKey ?: "") }
+    var keyVisible by remember(provider?.id) { mutableStateOf(false) }
+    var clipboardHint by remember(provider?.id) { mutableStateOf<String?>(null) }
     var model by remember(provider?.id) { mutableStateOf(provider?.model ?: "") }
     var kind by remember(provider?.id) { mutableStateOf(provider?.kind ?: "openai") }
+    val clipboard = LocalClipboardManager.current
     val urlError = if (baseUrl.isBlank()) null else ProviderUrlPolicy.error(baseUrl, apiKey)
 
     AlertDialog(
@@ -419,10 +427,39 @@ private fun ProviderDialog(
                 )
                 if (urlError != null) Text(urlError, color = Danger, fontSize = 11.sp, lineHeight = 15.sp)
                 OutlinedTextField(
-                    value = apiKey, onValueChange = { apiKey = it }, modifier = Modifier.fillMaxWidth().testTag("provider-key"),
-                    label = { Text("API-ключ") }, visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true
+                    value = apiKey,
+                    onValueChange = { apiKey = it; clipboardHint = null },
+                    modifier = Modifier.fillMaxWidth().testTag("provider-key"),
+                    label = { Text("API-ключ") },
+                    visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = if (keyVisible) KeyboardType.Text else KeyboardType.Password,
+                        autoCorrect = false
+                    ),
+                    trailingIcon = {
+                        IconButton(onClick = { keyVisible = !keyVisible }) {
+                            Icon(
+                                if (keyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (keyVisible) "Скрыть API-ключ" else "Показать API-ключ"
+                            )
+                        }
+                    },
+                    singleLine = true
                 )
+                TextButton(
+                    onClick = {
+                        // Clipboard access is explicit and limited to this foreground action.
+                        val text = runCatching { clipboard.getText()?.text?.trim() }.getOrNull()
+                        if (text.isNullOrEmpty()) {
+                            clipboardHint = "Не удалось вставить ключ: скопируйте текст и попробуйте снова. В эмуляторе проверьте синхронизацию буфера обмена."
+                        } else {
+                            apiKey = text
+                            clipboardHint = null
+                        }
+                    },
+                    modifier = Modifier.testTag("paste-provider-key")
+                ) { Text("Вставить из буфера") }
+                clipboardHint?.let { Text(it, color = Danger, fontSize = 11.sp, lineHeight = 15.sp) }
                 OutlinedTextField(value = model, onValueChange = { model = it }, modifier = Modifier.fillMaxWidth().testTag("provider-model"), label = { Text("Модель") }, singleLine = true)
                 Text(
                     "Адрес и ID модели можно изменить. HTTP разрешён только для локального сервера и без API-ключа; данные при этом не шифруются.",

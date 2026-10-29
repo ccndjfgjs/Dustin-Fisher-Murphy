@@ -2,6 +2,7 @@ package dev.opencode.mobile.agent
 
 import dev.opencode.mobile.ai.AiClient
 import dev.opencode.mobile.ai.AiClients
+import dev.opencode.mobile.ai.AiException
 import dev.opencode.mobile.ai.AiMessage
 import dev.opencode.mobile.ai.AiRequest
 import dev.opencode.mobile.data.ChatMessage
@@ -143,11 +144,18 @@ class AgentEngine {
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {
-            val text = t.message ?: t.javaClass.simpleName
+            val status = (t as? AiException)?.status ?: 0
+            val text = if (status == 401) {
+                "HTTP 401. Проверьте API-ключ в Настройках и доступ к выбранному провайдеру."
+            } else {
+                val detail = t.message ?: t.javaClass.simpleName
+                if (provider.apiKey.isNotEmpty()) detail.replace(provider.apiKey, "[ключ скрыт]") else detail
+            }
             listener.onAssistantDone(
                 ChatMessage(
                     role = Role.ASSISTANT,
-                    content = "⚠️ Ошибка: $text"
+                    content = "⚠️ Ошибка: $text",
+                    errorStatus = status
                 )
             )
             listener.onStatus("")

@@ -41,6 +41,8 @@ data class ChatMessage(
     val toolName: String? = null,
     val toolArgs: String? = null,
     val toolOk: Boolean? = null,
+    // Client-side errors are displayed locally and never sent back as model output.
+    val errorStatus: Int? = null,
     val streaming: Boolean = false,
     val expanded: Boolean = false,
     val ts: Long = System.currentTimeMillis()
@@ -61,6 +63,7 @@ data class ChatMessage(
         toolName?.let { o.put("toolName", it) }
         toolArgs?.let { o.put("toolArgs", it) }
         toolOk?.let { o.put("toolOk", it) }
+        errorStatus?.let { o.put("errorStatus", it) }
         return o
     }
 
@@ -79,6 +82,7 @@ data class ChatMessage(
                 toolName = if (o.has("toolName")) o.optString("toolName") else null,
                 toolArgs = if (o.has("toolArgs")) o.optString("toolArgs") else null,
                 toolOk = if (o.has("toolOk")) o.optBoolean("toolOk") else null,
+                errorStatus = if (!o.isNull("errorStatus")) o.optInt("errorStatus") else null,
                 expanded = o.optBoolean("expanded", false),
                 ts = o.optLong("ts", System.currentTimeMillis())
             )
