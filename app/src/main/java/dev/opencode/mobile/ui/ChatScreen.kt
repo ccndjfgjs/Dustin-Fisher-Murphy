@@ -51,6 +51,8 @@ import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -90,7 +92,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.opencode.mobile.data.ChatMessage
+import dev.opencode.mobile.data.ModelReasoningCatalog
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.ReasoningLevel
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
 import dev.opencode.mobile.data.TodoItem
@@ -108,7 +112,7 @@ fun ChatScreen(vm: AppViewModel) {
     val session = ui.session
     // Empty assistant tool-call envelopes are represented by the tool cards themselves.
     val messages = session?.messages.orEmpty().filterNot {
-        it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.toolCalls.isNotEmpty()
+        it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.reasoning.isBlank() && it.toolCalls.isNotEmpty()
     }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -257,6 +261,8 @@ fun ChatScreen(vm: AppViewModel) {
             onValueChange = vm::updateChatDraft,
             provider = ui.settings.activeProvider,
             busy = ui.busy,
+            reasoningLevel = ui.settings.reasoningLevel,
+            onReasoningLevelChange = { level -> vm.saveSettings { it.copy(reasoningLevel = level) } },
             onModelClick = { focusManager.clearFocus(); showModels = true },
             onSend = {
                 if (ui.chatDraft.isNotBlank() && !ui.busy) {
@@ -461,6 +467,10 @@ internal fun AssistantMessage(message: ChatMessage, onSettings: () -> Unit) {
             }
         }
         Spacer(Modifier.height(8.dp))
+        if (message.reasoning.isNotBlank()) {
+            ReasoningCard(message)
+            Spacer(Modifier.height(8.dp))
+        }
         if (message.content.isBlank() && message.streaming) {
             Text("Готовлю ответ…", color = Muted, fontSize = 13.sp)
         } else if (message.content.isNotBlank()) {
@@ -472,6 +482,42 @@ internal fun AssistantMessage(message: ChatMessage, onSettings: () -> Unit) {
         }
         if (message.errorStatus == 401) {
             TextButton(onClick = onSettings) { Text("Открыть настройки") }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningCard(message: ChatMessage) {
+    var expanded by remember(message.id) { mutableStateOf(message.streaming) }
+    LaunchedEffect(message.streaming) { expanded = message.streaming }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val duration = message.reasoningDurationMs?.let { if (it < 1000) "< 1 с" else "${it / 1000} с" }
+    Column(Modifier.fillMaxWidth().border(1.dp, ChatOutline, RoundedCornerShape(10.dp)).testTag("reasoning-card")) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.weight(1f).clickable { expanded = !expanded }.padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Рассуждение" + when { message.streaming -> " · выполняется"; duration != null -> " · $duration"; else -> "" },
+                    color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Medium
+                )
+            }
+            IconButton(onClick = {
+                clipboard.setText(AnnotatedString(message.reasoning))
+                Toast.makeText(context, "Рассуждение скопировано", Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Outlined.ContentCopy, "Скопировать рассуждение", tint = Muted, modifier = Modifier.size(16.dp))
+            }
+        }
+        if (expanded) {
+            SelectionContainer {
+                Text(message.reasoning, modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+            }
         }
     }
 }
@@ -546,7 +592,9 @@ internal fun ChatComposer(
     busy: Boolean,
     onModelClick: () -> Unit,
     onSend: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
+    onReasoningLevelChange: (ReasoningLevel) -> Unit = {}
 ) {
     Column(Modifier.fillMaxWidth().imePadding().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
         Column(
@@ -568,6 +616,28 @@ internal fun ChatComposer(
                     }
                 }
             )
+            val capability = ModelReasoningCatalog.capability(provider)
+            if (capability != null) {
+                var menuOpen by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { menuOpen = true }, enabled = !busy) {
+                        Text("Рассуждение: ${reasoningLevel.label}", fontSize = 11.sp)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        ReasoningLevel.entries.forEach { level ->
+                            DropdownMenuItem(text = { Text(level.label) }, onClick = {
+                                onReasoningLevelChange(level)
+                                menuOpen = false
+                            })
+                        }
+                    }
+                }
+                if (ModelReasoningCatalog.toolsRestricted(provider, provider.model, reasoningLevel)) {
+                    Text("DeepSeek: инструменты отключены, пока включено рассуждение.", color = Muted, fontSize = 10.sp)
+                } else if (capability.alwaysOn && reasoningLevel == ReasoningLevel.OFF) {
+                    Text("Модель рассуждает всегда; используется уровень по умолчанию.", color = Muted, fontSize = 10.sp)
+                }
+            }
             Spacer(Modifier.height(8.dp))
             BoxWithConstraints(Modifier.fillMaxWidth().testTag("chat-composer-actions")) {
                 val maxChipWidth = (maxWidth - 48.dp).coerceAtLeast(0.dp)

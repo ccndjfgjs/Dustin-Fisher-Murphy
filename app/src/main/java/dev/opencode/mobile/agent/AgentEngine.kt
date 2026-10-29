@@ -5,8 +5,11 @@ import dev.opencode.mobile.ai.AiClients
 import dev.opencode.mobile.ai.AiException
 import dev.opencode.mobile.ai.AiMessage
 import dev.opencode.mobile.ai.AiRequest
+import dev.opencode.mobile.data.AnthropicTrace
 import dev.opencode.mobile.data.ChatMessage
+import dev.opencode.mobile.data.ModelReasoningCatalog
 import dev.opencode.mobile.data.Provider
+import dev.opencode.mobile.data.ReasoningLevel
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.TodoItem
 import dev.opencode.mobile.data.ToolCallRef
@@ -25,6 +28,7 @@ class AgentEngine {
         fun onStatus(text: String)
         fun onAssistantStart()
         fun onAssistantDelta(text: String)
+        fun onAssistantReasoningDelta(text: String) = Unit
         fun onAssistantDone(message: ChatMessage)
         fun onToolStart(call: ToolCallRef)
         fun onToolEnd(call: ToolCallRef, ok: Boolean, output: String)
@@ -49,35 +53,67 @@ class AgentEngine {
         maxIterations: Int,
         systemAppend: String,
         streaming: Boolean,
+        reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
         listener: Listener
     ) {
+        var pendingReasoning = StringBuilder()
+        var reasoningStart: Long? = null
+        var reasoningLast: Long? = null
+        fun reasoningDuration(): Long? = reasoningStart?.let { start ->
+            ((reasoningLast ?: System.nanoTime()) - start).coerceAtLeast(0) / 1_000_000
+        }
         try {
             val ai = AiClients.create(provider)
             client = ai
             val useRoot = canUseRoot && withContext(Dispatchers.IO) { Shell.rootAvailable() }
-            val system = withContext(Dispatchers.IO) { buildSystemPrompt(cwd, useRoot, systemAppend) }
+            val restrictedTools = ModelReasoningCatalog.toolsRestricted(provider, model, reasoningLevel)
+            val system = withContext(Dispatchers.IO) { buildSystemPrompt(cwd, useRoot, systemAppend) } +
+                if (restrictedTools) "\nИнструменты в этом запросе отключены. Не утверждай, что ты их вызвал." else ""
             val messages = mutableListOf<AiMessage>()
-            messages.addAll(HistoryAdapter.toAiMessages(trimHistory(history)))
+            val adapted = HistoryAdapter.toAiMessages(trimHistory(history))
+            messages.addAll(if (restrictedTools) adapted.filter { it.role != "tool" }
+                .map { it.copy(toolCalls = emptyList()) }
+                .filter { it.role != "assistant" || it.content.isNotBlank() } else adapted)
             var iterations = maxIterations.coerceIn(1, 100)
             while (iterations-- > 0) {
                 listener.onStatus("Думаю…")
                 listener.onAssistantStart()
+                pendingReasoning = StringBuilder()
+                reasoningStart = null
+                reasoningLast = null
                 val request = AiRequest(
                     model = model,
                     system = system,
                     messages = messages,
-                    tools = Tools.specs,
+                    tools = if (restrictedTools) emptyList() else Tools.specs,
                     temperature = 0.2,
                     maxTokens = 8192,
-                    stream = streaming
+                    stream = streaming,
+                    reasoningLevel = reasoningLevel
                 )
-                val response = ai.complete(request) { delta ->
+                val response = ai.complete(request, onReasoning = { delta ->
+                    val now = System.nanoTime()
+                    if (reasoningStart == null) reasoningStart = now
+                    reasoningLast = now
+                    pendingReasoning.append(delta)
+                    withContext(Dispatchers.Main.immediate) { listener.onAssistantReasoningDelta(delta) }
+                }) { delta ->
                     withContext(Dispatchers.Main.immediate) { listener.onAssistantDelta(delta) }
                 }
-
+                if (restrictedTools && response.toolCalls.isNotEmpty()) throw AiException("Инструменты отключены в режиме рассуждения DeepSeek")
+                if (pendingReasoning.isEmpty() && response.reasoning.isNotEmpty()) {
+                    pendingReasoning.append(response.reasoning)
+                    listener.onAssistantReasoningDelta(response.reasoning)
+                }
+                val trace = response.anthropicBlocks.takeIf { blocks -> blocks.any {
+                    runCatching { JSONObject(it).optString("type") in setOf("thinking", "redacted_thinking") }.getOrDefault(false)
+                } }?.let { AnthropicTrace(provider.id, provider.baseUrl, model, it) }
                 val assistantMsg = ChatMessage(
                     role = Role.ASSISTANT,
                     content = response.content,
+                    reasoning = response.reasoning,
+                    reasoningDurationMs = reasoningDuration(),
+                    anthropicTrace = trace,
                     toolCalls = response.toolCalls.map { ToolCallRef(it.id, it.name, it.arguments, it.googleThoughtSignature) }
                 )
                 listener.onAssistantDone(assistantMsg)
@@ -85,7 +121,8 @@ class AgentEngine {
                     AiMessage(
                         role = "assistant",
                         content = response.content,
-                        toolCalls = response.toolCalls
+                        toolCalls = response.toolCalls,
+                        anthropicTrace = trace
                     )
                 )
 
@@ -155,6 +192,8 @@ class AgentEngine {
                 ChatMessage(
                     role = Role.ASSISTANT,
                     content = "⚠️ Ошибка: $text",
+                    reasoning = pendingReasoning.toString(),
+                    reasoningDurationMs = reasoningDuration(),
                     errorStatus = status
                 )
             )

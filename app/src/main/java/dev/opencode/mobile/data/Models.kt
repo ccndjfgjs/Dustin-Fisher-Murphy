@@ -32,10 +32,34 @@ data class ToolCallRef(
     }
 }
 
+/** Complete Anthropic content blocks, in original order, tied to their source. */
+data class AnthropicTrace(
+    val providerId: String,
+    val baseUrl: String,
+    val model: String,
+    val blocks: List<String>
+) {
+    fun toJson(): JSONObject = JSONObject().put("providerId", providerId).put("baseUrl", baseUrl)
+        .put("model", model).put("blocks", JSONArray(blocks))
+
+    companion object {
+        fun fromJson(o: JSONObject): AnthropicTrace {
+            val blocks = mutableListOf<String>()
+            o.optJSONArray("blocks")?.let { arr ->
+                for (i in 0 until arr.length()) blocks.add(arr.optString(i))
+            }
+            return AnthropicTrace(o.optString("providerId"), o.optString("baseUrl"), o.optString("model"), blocks)
+        }
+    }
+}
+
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val role: Role,
     val content: String = "",
+    val reasoning: String = "",
+    val reasoningDurationMs: Long? = null,
+    val anthropicTrace: AnthropicTrace? = null,
     val toolCalls: List<ToolCallRef> = emptyList(),
     val toolCallId: String? = null,
     val toolName: String? = null,
@@ -52,6 +76,9 @@ data class ChatMessage(
         o.put("id", id)
         o.put("role", role.name)
         o.put("content", content)
+        if (reasoning.isNotEmpty()) o.put("reasoning", reasoning)
+        reasoningDurationMs?.let { o.put("reasoningDurationMs", it) }
+        anthropicTrace?.let { o.put("anthropicTrace", it.toJson()) }
         o.put("ts", ts)
         o.put("expanded", expanded)
         if (toolCalls.isNotEmpty()) {
@@ -77,6 +104,9 @@ data class ChatMessage(
                 id = o.optString("id", UUID.randomUUID().toString()),
                 role = runCatching { Role.valueOf(o.optString("role", "USER")) }.getOrDefault(Role.USER),
                 content = o.optString("content", ""),
+                reasoning = o.optString("reasoning", ""),
+                reasoningDurationMs = if (!o.isNull("reasoningDurationMs")) o.optLong("reasoningDurationMs") else null,
+                anthropicTrace = o.optJSONObject("anthropicTrace")?.let { AnthropicTrace.fromJson(it) },
                 toolCalls = calls,
                 toolCallId = if (o.has("toolCallId")) o.optString("toolCallId") else null,
                 toolName = if (o.has("toolName")) o.optString("toolName") else null,

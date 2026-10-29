@@ -29,4 +29,6 @@ internal object ProviderRequestPolicy {
     }
 
     fun isGoogleGemini(baseUrl: String): Boolean = host(baseUrl) == "generativelanguage.googleapis.com"
+
+    fun isOpenAi(baseUrl: String): Boolean = host(baseUrl) == "api.openai.com"
 }

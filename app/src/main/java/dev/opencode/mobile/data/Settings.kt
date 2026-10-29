@@ -105,6 +105,7 @@ data class AppSettings(
     val systemAppend: String = "",
     val lastWorkspace: String = "/sdcard/OpenCode",
     val streaming: Boolean = true,
+    val reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
     val fontSize: Int = 13,
     val lastSessionId: String? = null
 ) {
@@ -133,6 +134,7 @@ data class AppSettings(
             .put("systemAppend", systemAppend)
             .put("lastWorkspace", lastWorkspace)
             .put("streaming", streaming)
+            .put("reasoningLevel", reasoningLevel.name)
             .put("fontSize", fontSize)
             .put("lastSessionId", lastSessionId ?: "")
     }
@@ -154,6 +156,7 @@ data class AppSettings(
                 systemAppend = o.optString("systemAppend", ""),
                 lastWorkspace = o.optString("lastWorkspace", "/sdcard/OpenCode"),
                 streaming = o.optBoolean("streaming", true),
+                reasoningLevel = ReasoningLevel.from(o.optString("reasoningLevel", "OFF")),
                 fontSize = o.optInt("fontSize", 13),
                 lastSessionId = lastSession.ifBlank { null }
             )

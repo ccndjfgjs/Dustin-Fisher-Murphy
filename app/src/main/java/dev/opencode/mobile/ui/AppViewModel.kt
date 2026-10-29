@@ -78,6 +78,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
     private var pendingOutput = StringBuilder()
     private var lastChunkFlush = 0L
+    private var reasoningStartNanos: Long? = null
+    private var reasoningLastNanos: Long? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var agentRunId = 0L
     // Drafts survive navigation and session changes while the app process remains alive.
@@ -322,6 +324,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     maxIterations = settings.maxIterations,
                     systemAppend = settings.systemAppend,
                     streaming = settings.streaming,
+                    reasoningLevel = settings.reasoningLevel,
                     listener = agentListener(runId, session.id)
                 )
             } catch (c: kotlinx.coroutines.CancellationException) {
@@ -330,7 +333,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 updateMessages { messages ->
                     messages.map { message ->
                         when {
-                            message.streaming -> message.copy(streaming = false, content = message.content.ifBlank { "Остановлено." })
+                            message.streaming -> message.copy(
+                                streaming = false,
+                                content = message.content.ifBlank { "Остановлено." },
+                                reasoningDurationMs = reasoningStartNanos?.let { start ->
+                                    ((reasoningLastNanos ?: System.nanoTime()) - start).coerceAtLeast(0) / 1_000_000
+                                }
+                            )
                             message.role == Role.TOOL && message.toolOk == null -> message.copy(
                                 toolOk = false,
                                 content = "Выполнение прервано. Проверьте состояние файлов перед повтором."
@@ -396,6 +405,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onAssistantStart() = dispatchAgentEvent(runId, sessionId) {
             pendingOutput = StringBuilder()
+            reasoningStartNanos = null
+            reasoningLastNanos = null
             appendMessage(ChatMessage(role = Role.ASSISTANT, content = "", streaming = true))
         }
 
@@ -404,6 +415,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val idx = list.indexOfLast { it.role == Role.ASSISTANT && it.streaming }
                 if (idx < 0) list else list.toMutableList().also {
                     it[idx] = it[idx].copy(content = it[idx].content + text)
+                }
+            }
+        }
+
+        override fun onAssistantReasoningDelta(text: String) = dispatchAgentEvent(runId, sessionId) {
+            val now = System.nanoTime()
+            if (reasoningStartNanos == null) reasoningStartNanos = now
+            reasoningLastNanos = now
+            updateMessages { list ->
+                val idx = list.indexOfLast { it.role == Role.ASSISTANT && it.streaming }
+                if (idx < 0) list else list.toMutableList().also {
+                    it[idx] = it[idx].copy(reasoning = it[idx].reasoning + text)
                 }
             }
         }

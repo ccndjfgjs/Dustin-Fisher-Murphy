@@ -67,7 +67,7 @@ object ProviderCatalog {
             baseUrl = "https://coding-intl.dashscope.aliyuncs.com/v1",
             model = "qwen3.7-plus",
             extraModels = listOf("qwen3.6-plus", "qwen3.5-plus"),
-            note = "Нужен отдельный ключ Coding Plan и подходящая подписка. Проверьте регион, доступность приложения и правила тарифа. Для Qwen3.7/3.6/3.5 Plus используется режим без thinking."
+            note = "Нужен отдельный ключ Coding Plan и подходящая подписка. Проверьте регион, доступность приложения и правила тарифа. Для Qwen3.7/3.6/3.5 Plus thinking по умолчанию выключен; его можно включить в чате."
         ),
         ProviderPreset(
             id = "alibaba-coding-cn",
@@ -76,7 +76,7 @@ object ProviderCatalog {
             baseUrl = "https://coding.dashscope.aliyuncs.com/v1",
             model = "qwen3.7-plus",
             extraModels = listOf("qwen3.6-plus", "qwen3.5-plus"),
-            note = "Нужен ключ Coding Plan (sk-sp-…) и подписка для Китая. Проверьте правила тарифа и поддержку приложения. Для Qwen3.7/3.6/3.5 Plus используется режим без thinking."
+            note = "Нужен ключ Coding Plan (sk-sp-…) и подписка для Китая. Проверьте правила тарифа и поддержку приложения. Для Qwen3.7/3.6/3.5 Plus thinking по умолчанию выключен; его можно включить в чате."
         ),
         ProviderPreset(
             id = "dahl",
@@ -94,7 +94,7 @@ object ProviderCatalog {
             baseUrl = "https://spacebunnymodel.com/api/v1",
             model = "space-bunny-alpha",
             extraModels = listOf("space-bunny-flash"),
-            note = "Используйте ключ sb_live_ из своего dashboard и проверьте баланс и тариф. Внутренние рассуждения не отображаются; работа инструментов через этот API не проверена."
+            note = "Используйте ключ sb_live_ из своего dashboard и проверьте баланс и тариф. Если API вернёт отдельное поле рассуждения, оно отобразится в чате; работа инструментов через этот API не проверена."
         ),
         ProviderPreset(
             id = "agentrouter-openai",
@@ -122,7 +122,7 @@ object ProviderCatalog {
             baseUrl = "https://api.deepseek.com",
             model = "deepseek-flash",
             extraModels = listOf("deepseek-v4-pro"),
-            note = "Нужен API-ключ DeepSeek. Для совместимости инструментов thinking отключён; внутренние рассуждения не отображаются."
+            note = "Нужен API-ключ DeepSeek. Рассуждение выключено по умолчанию; при включении инструменты отключаются, поскольку приложение не возвращает не-Anthropic рассуждения в историю."
         ),
         ProviderPreset(
             id = "gemini",

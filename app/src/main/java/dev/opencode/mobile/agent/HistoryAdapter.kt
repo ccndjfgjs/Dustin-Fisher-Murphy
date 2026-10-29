@@ -22,7 +22,8 @@ internal object HistoryAdapter {
                     out.add(AiMessage(
                         role = "assistant",
                         content = message.content,
-                        toolCalls = message.toolCalls.map { AiToolCall(it.id, it.name, it.arguments, it.googleThoughtSignature) }
+                        toolCalls = message.toolCalls.map { AiToolCall(it.id, it.name, it.arguments, it.googleThoughtSignature) },
+                        anthropicTrace = message.anthropicTrace
                     ))
                     if (message.toolCalls.isNotEmpty()) {
                         val results = mutableMapOf<String, ChatMessage>()
