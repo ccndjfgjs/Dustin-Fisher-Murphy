@@ -110,10 +110,10 @@ fun MarkdownText(text: String, modifier: Modifier = Modifier) {
                 val clipboard = LocalClipboardManager.current
                 val context = LocalContext.current
                 Column(
-                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF10131B))
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(DesignTokens.codeBackground)
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().background(Color(0xFF202633)).padding(start = 12.dp, end = 4.dp),
+                        modifier = Modifier.fillMaxWidth().background(DesignTokens.codeHeader).padding(start = 12.dp, end = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(part.language.ifBlank { "код" }, color = Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
@@ -132,7 +132,7 @@ fun MarkdownText(text: String, modifier: Modifier = Modifier) {
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 18.sp,
-                        color = Color(0xFFD7DEEA),
+                        color = DesignTokens.textHigh,
                         softWrap = false
                     )
                 }
@@ -183,7 +183,7 @@ private fun inlineMarkdown(text: String): AnnotatedString = buildAnnotatedString
             c == '`' -> {
                 inCode = !inCode
                 if (!inCode) {
-                    withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Color(0xFF232734))) {
+                    withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = DesignTokens.inlineCode)) {
                         append(code.toString())
                     }
                     code.clear()

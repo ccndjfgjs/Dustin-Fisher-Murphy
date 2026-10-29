@@ -72,7 +72,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -98,12 +97,11 @@ import dev.opencode.mobile.data.ReasoningLevel
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
 import dev.opencode.mobile.data.TodoItem
+import dev.opencode.mobile.data.ToolCallRef
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.File
-
-private val ChatPanel = Color(0xFF1A1E28)
-private val ChatOutline = Color(0xFF303747)
 
 @Composable
 fun ChatScreen(vm: AppViewModel) {
@@ -245,7 +243,10 @@ fun ChatScreen(vm: AppViewModel) {
             }
         }
 
-        if (ui.busy && ui.status.isNotBlank()) {
+        ui.approval?.call?.let { call ->
+            InlineApproval(call, vm.currentToolCallArgs(call.name, call.arguments), vm::approve)
+        }
+        if (ui.busy && ui.status.isNotBlank() && ui.approval == null) {
             Row(
                 modifier = Modifier.padding(start = 22.dp, end = 16.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -348,7 +349,7 @@ private fun EmptyChat(showSuggestions: Boolean, onPrompt: (String) -> Unit) {
     ) {
         Box(
             Modifier.size(58.dp).clip(RoundedCornerShape(19.dp)).background(
-                Brush.linearGradient(listOf(Color(0xFF7097FF), Color(0xFF8B78DE)))
+                Accent
             ),
             contentAlignment = Alignment.Center
         ) {
@@ -368,7 +369,7 @@ private fun EmptyChat(showSuggestions: Boolean, onPrompt: (String) -> Unit) {
         if (showSuggestions) suggestions.forEach { (label, prompt, icon) ->
             Row(
                 modifier = Modifier.fillMaxWidth().widthIn(max = 360.dp).padding(vertical = 3.dp)
-                    .clip(RoundedCornerShape(13.dp)).border(1.dp, ChatOutline, RoundedCornerShape(13.dp))
+                    .clip(RoundedCornerShape(13.dp)).border(1.dp, DesignTokens.outline, RoundedCornerShape(13.dp))
                     .clickable { onPrompt(prompt) }.padding(horizontal = 14.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -430,14 +431,14 @@ private fun TodoStrip(todos: List<TodoItem>) {
 @Composable
 private fun MessageItem(message: ChatMessage, vm: AppViewModel, onExpandTool: () -> Unit) {
     when (message.role) {
-        Role.USER -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            SelectionContainer {
-                Text(
-                    message.content,
-                    modifier = Modifier.widthIn(max = 340.dp).clip(RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp))
-                        .background(Color(0xFF273653)).padding(horizontal = 15.dp, vertical = 11.dp),
-                    fontSize = 14.sp, lineHeight = 21.sp, color = Color(0xFFF1F4FF)
-                )
+        Role.USER -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Box(Modifier.width(2.dp).height(36.dp).background(Accent.copy(alpha = 0.65f)))
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Вы", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                SelectionContainer {
+                    Text(message.content, fontSize = 14.sp, lineHeight = 21.sp, color = DesignTokens.textHigh)
+                }
             }
         }
         Role.ASSISTANT -> AssistantMessage(message, onSettings = { vm.navigate(Screen.SETTINGS) })
@@ -493,7 +494,7 @@ private fun ReasoningCard(message: ChatMessage) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val duration = message.reasoningDurationMs?.let { if (it < 1000) "< 1 с" else "${it / 1000} с" }
-    Column(Modifier.fillMaxWidth().border(1.dp, ChatOutline, RoundedCornerShape(10.dp)).testTag("reasoning-card")) {
+    Column(Modifier.fillMaxWidth().border(1.dp, DesignTokens.outline, RoundedCornerShape(10.dp)).testTag("reasoning-card")) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
                 Modifier.weight(1f).clickable { expanded = !expanded }.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -522,13 +523,57 @@ private fun ReasoningCard(message: ChatMessage) {
     }
 }
 
+// A preview of requested replacement arguments, not a claim that the edit succeeded.
+private fun replacementPreview(name: String?, args: String?): String? {
+    if (name != "edit_file" || args.isNullOrBlank()) return null
+    return runCatching {
+        val json = JSONObject(args)
+        val old = json.optString("old_string", "")
+        val new = json.optString("new_string", "")
+        if (old.isEmpty() && new.isEmpty()) null else {
+            fun lines(value: String, prefix: String) = value.take(1000).lines().take(12).joinToString("\n") { "$prefix $it" }
+            listOf(lines(old, "-"), lines(new, "+")).joinToString("\n") +
+                if (old.length > 1000 || new.length > 1000 || old.lines().size > 12 || new.lines().size > 12) "\n…" else ""
+        }
+    }.getOrNull()
+}
+
+@Composable
+internal fun InlineApproval(call: ToolCallRef, summary: String, onDecision: (Boolean) -> Unit) {
+    val preview = remember(call.arguments, call.name) { replacementPreview(call.name, call.arguments) }
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp)).background(SurfaceColor)
+            .border(1.dp, Accent.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+            .padding(start = 12.dp, end = 8.dp, top = 8.dp).testTag("inline-approval")
+    ) {
+        Text("Разрешить инструмент?", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Column(Modifier.heightIn(max = 110.dp).verticalScroll(rememberScrollState())) {
+            SelectionContainer {
+                Column {
+                    Text(call.name, color = DesignTokens.textHigh, fontSize = 11.sp, fontFamily = Mono)
+                    if (summary.isNotBlank()) Text(summary, color = Muted, fontSize = 10.sp, fontFamily = Mono)
+                    if (preview != null) {
+                        Text("Предпросмотр замены (до выполнения)", color = Muted, fontSize = 10.sp)
+                        Text(preview, color = DesignTokens.textHigh, fontSize = 10.sp, lineHeight = 14.sp, fontFamily = Mono)
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { onDecision(false) }) { Text("Отклонить") }
+            TextButton(onClick = { onDecision(true) }) { Text("Разрешить") }
+        }
+    }
+}
+
 @Composable
 private fun ToolCard(message: ChatMessage, vm: AppViewModel, onExpand: () -> Unit) {
     val color = when (message.toolOk) { true -> Success; false -> Danger; null -> Accent }
     val args = vm.currentToolCallArgs(message.toolName.orEmpty(), message.toolArgs)
     Column(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SurfaceColor)
-            .border(1.dp, ChatOutline.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+            .border(1.dp, DesignTokens.outline.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable(onClick = onExpand)
@@ -556,6 +601,10 @@ private fun ToolCard(message: ChatMessage, vm: AppViewModel, onExpand: () -> Uni
                 Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
                     Text(message.toolName.orEmpty(), color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                     if (args.isNotBlank()) Text(args, color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
+                    replacementPreview(message.toolName, message.toolArgs)?.let { preview ->
+                        Text("Запрошенная замена", color = Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
+                        Text(preview, color = DesignTokens.textHigh, fontSize = 10.sp, lineHeight = 14.sp, fontFamily = Mono)
+                    }
                     if (message.content.isNotBlank()) {
                         Text(
                             message.content, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -598,8 +647,8 @@ internal fun ChatComposer(
 ) {
     Column(Modifier.fillMaxWidth().imePadding().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(ChatPanel)
-                .border(1.dp, ChatOutline, RoundedCornerShape(22.dp)).padding(start = 14.dp, end = 8.dp, top = 14.dp, bottom = 8.dp)
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(DesignTokens.chatPanel)
+                .border(1.dp, DesignTokens.outline, RoundedCornerShape(22.dp)).padding(start = 14.dp, end = 8.dp, top = 14.dp, bottom = 8.dp)
         ) {
             BasicTextField(
                 value = value,
@@ -655,7 +704,7 @@ internal fun ChatComposer(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f, fill = false)) {
-                            Text(provider.model.ifBlank { "Выберите модель" }, color = Color(0xFFE5EBFF), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(provider.model.ifBlank { "Выберите модель" }, color = DesignTokens.textHigh, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(if (busy) "${provider.name} · следующий запрос" else provider.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         Icon(Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(18.dp))
@@ -664,7 +713,7 @@ internal fun ChatComposer(
                     val enabled = busy || value.isNotBlank()
                     Box(
                         modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp))
-                            .background(if (busy) Danger.copy(alpha = 0.2f) else if (enabled) Accent else Color(0xFF303745))
+                            .background(if (busy) Danger.copy(alpha = 0.2f) else if (enabled) Accent else DesignTokens.disabledControl)
                             .clickable(enabled = enabled, role = SemanticsRole.Button) { if (busy) onStop() else onSend() }
                             .semantics { contentDescription = if (busy) "Остановить ответ" else "Отправить сообщение" }
                             .testTag("chat-send"),
@@ -673,7 +722,7 @@ internal fun ChatComposer(
                         Icon(
                             if (busy) Icons.Default.Stop else Icons.Default.ArrowUpward,
                             contentDescription = null,
-                            tint = if (busy) Danger else if (enabled) Color(0xFF101629) else Muted,
+                            tint = if (busy) Danger else if (enabled) DesignTokens.onAccent else Muted,
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -696,7 +745,7 @@ private fun SessionsSheet(
     onDelete: (String) -> Unit
 ) {
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
-    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = ChatPanel) {
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), containerColor = DesignTokens.chatPanel) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
             Text("История чатов", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text(if (busy) "Сначала остановите текущую задачу" else "Ваши диалоги на этом устройстве", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))

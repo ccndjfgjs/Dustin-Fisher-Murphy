@@ -17,6 +17,19 @@ val Muted = Color(0xFF8A91A3)
 val Success = Color(0xFF6BD98B)
 val Danger = Color(0xFFFF6B6B)
 
+/** Shared desktop-inspired surfaces; status colours are semantic, not extra brand accents. */
+object DesignTokens {
+    val chatPanel = Color(0xFF1A1E28)
+    val outline = Color(0xFF303747)
+    val codeBackground = Color(0xFF10131B)
+    val codeHeader = Color(0xFF202633)
+    val inlineCode = Color(0xFF232734)
+    val terminalBackground = Color(0xFF0B0D12)
+    val textHigh = Color(0xFFE5EBFF)
+    val disabledControl = Color(0xFF303745)
+    val onAccent = Color(0xFF101629)
+}
+
 val Mono = FontFamily.Monospace
 
 private val DarkScheme = darkColorScheme(

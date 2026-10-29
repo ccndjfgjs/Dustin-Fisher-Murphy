@@ -102,7 +102,7 @@ fun TerminalScreen(vm: AppViewModel) {
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color0B0D12)
+                .background(DesignTokens.terminalBackground)
         ) {
             LazyColumn(
                 state = listState,
@@ -182,5 +182,3 @@ fun TerminalScreen(vm: AppViewModel) {
         }
     }
 }
-
-private val Color0B0D12 = androidx.compose.ui.graphics.Color(0xFF0B0D12)
