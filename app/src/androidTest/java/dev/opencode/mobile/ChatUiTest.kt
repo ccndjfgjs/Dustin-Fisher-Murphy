@@ -2,7 +2,6 @@ package dev.opencode.mobile
 
 import android.content.ClipboardManager
 import android.content.Context
-import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasText

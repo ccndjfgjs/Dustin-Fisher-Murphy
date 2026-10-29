@@ -98,11 +98,15 @@ private val ChatOutline = Color(0xFF303747)
 fun ChatScreen(vm: AppViewModel) {
     val ui = vm.ui
     val session = ui.session
-    val messages = session?.messages.orEmpty()
+    // Empty assistant tool-call envelopes are represented by the tool cards themselves.
+    val messages = session?.messages.orEmpty().filterNot {
+        it.role == Role.ASSISTANT && !it.streaming && it.content.isBlank() && it.toolCalls.isNotEmpty()
+    }
     val listState = rememberLazyListState()
     var showSessions by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
     var followLatest by remember(session?.id) { mutableStateOf(true) }
+    var autoScrolling by remember(session?.id) { mutableStateOf(false) }
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     val nearBottom by remember(listState) {
         derivedStateOf {
@@ -115,7 +119,19 @@ fun ChatScreen(vm: AppViewModel) {
 
     // Follow streaming output only while the user is at the bottom; don't pull them away from history.
     LaunchedEffect(dragging) {
-        if (!dragging) followLatest = nearBottom
+        if (dragging) followLatest = false else followLatest = nearBottom
+    }
+    LaunchedEffect(session?.id, listState) {
+        var manualScroll = false
+        snapshotFlow { listState.isScrollInProgress to autoScrolling }.collect { (scrolling, automatic) ->
+            if (scrolling && !automatic) {
+                manualScroll = true
+                followLatest = false
+            } else if (!scrolling && !automatic && manualScroll) {
+                manualScroll = false
+                followLatest = nearBottom
+            }
+        }
     }
     LaunchedEffect(session?.id, messages.size, followLatest, dragging) {
         if (messages.isNotEmpty() && followLatest && !dragging) {
@@ -123,11 +139,15 @@ fun ChatScreen(vm: AppViewModel) {
             snapshotFlow { listState.layoutInfo }.collect { info ->
                 if (info.totalItemsCount == messages.size) {
                     val last = info.visibleItemsInfo.lastOrNull()
-                    if (last == null || last.index < messages.lastIndex) {
-                        listState.scrollToItem(messages.lastIndex)
-                    } else {
-                        val overflow = last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding)
-                        if (overflow > 0) listState.scrollBy(overflow.toFloat())
+                    val overflow = if (last != null) last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding) else 0
+                    if (last == null || last.index < messages.lastIndex || overflow > 0) {
+                        autoScrolling = true
+                        try {
+                            if (last == null || last.index < messages.lastIndex) listState.scrollToItem(messages.lastIndex)
+                            else listState.scrollBy(overflow.toFloat())
+                        } finally {
+                            autoScrolling = false
+                        }
                     }
                 }
             }
@@ -160,7 +180,9 @@ fun ChatScreen(vm: AppViewModel) {
                     contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 18.dp, bottom = 20.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
-                    items(messages, key = { it.id }) { message -> MessageItem(message, vm) }
+                    items(messages, key = { it.id }) { message ->
+                        MessageItem(message, vm, onExpandTool = { followLatest = false; vm.toggleMessage(message.id) })
+                    }
                 }
                 if (!followLatest) {
                     IconButton(
@@ -355,7 +377,7 @@ private fun TodoStrip(todos: List<TodoItem>) {
 }
 
 @Composable
-private fun MessageItem(message: ChatMessage, vm: AppViewModel) {
+private fun MessageItem(message: ChatMessage, vm: AppViewModel, onExpandTool: () -> Unit) {
     when (message.role) {
         Role.USER -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             SelectionContainer {
@@ -368,7 +390,7 @@ private fun MessageItem(message: ChatMessage, vm: AppViewModel) {
             }
         }
         Role.ASSISTANT -> AssistantMessage(message)
-        Role.TOOL -> ToolCard(message, vm)
+        Role.TOOL -> ToolCard(message, vm, onExpandTool)
     }
 }
 
@@ -400,12 +422,14 @@ private fun AssistantMessage(message: ChatMessage) {
             SelectionContainer { MarkdownText(message.content) }
         } else if (message.toolCalls.isNotEmpty()) {
             Text("Запускаю инструменты…", color = Muted, fontSize = 12.sp)
+        } else {
+            Text("Модель не вернула текст.", color = Muted, fontSize = 12.sp)
         }
     }
 }
 
 @Composable
-private fun ToolCard(message: ChatMessage, vm: AppViewModel) {
+private fun ToolCard(message: ChatMessage, vm: AppViewModel, onExpand: () -> Unit) {
     val color = when (message.toolOk) { true -> Success; false -> Danger; null -> Accent }
     val args = vm.currentToolCallArgs(message.toolName.orEmpty(), message.toolArgs)
     Column(
@@ -413,7 +437,7 @@ private fun ToolCard(message: ChatMessage, vm: AppViewModel) {
             .border(1.dp, ChatOutline.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().clickable { vm.toggleMessage(message.id) }
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onExpand)
                 .padding(horizontal = 12.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
