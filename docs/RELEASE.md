@@ -81,13 +81,19 @@ sha256sum app/build/outputs/apk/release/app-release.apk app/build/outputs/bundle
 
 ### GitHub Actions
 
-В **Settings → Secrets and variables → Actions** добавьте секреты `RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`. Например, при установленном и авторизованном GitHub CLI можно передать значения через stdin, не выводя приватный ключ на экран:
+В **Settings → Secrets and variables → Actions** добавьте секреты `RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`. Например, при установленном и авторизованном GitHub CLI можно передать значения через stdin, не выводя приватный ключ на экран. Если вы уже выполнили `unset` после локальной сборки, сначала повторно введите пароль:
 
 ```bash
+export RELEASE_STORE_FILE="$HOME/opencode-signing/upload-key.p12"
+export RELEASE_KEY_ALIAS=opencode-upload
+read -rsp 'Пароль хранилища: ' RELEASE_STORE_PASSWORD; echo
+export RELEASE_STORE_PASSWORD
+export RELEASE_KEY_PASSWORD="$RELEASE_STORE_PASSWORD"
 base64 < "$RELEASE_STORE_FILE" | tr -d '\n' | gh secret set RELEASE_KEYSTORE_BASE64
 printf '%s' "$RELEASE_STORE_PASSWORD" | gh secret set RELEASE_STORE_PASSWORD
 printf '%s' "$RELEASE_KEY_ALIAS" | gh secret set RELEASE_KEY_ALIAS
 printf '%s' "$RELEASE_KEY_PASSWORD" | gh secret set RELEASE_KEY_PASSWORD
+unset RELEASE_STORE_PASSWORD RELEASE_KEY_PASSWORD
 ```
 
 Проверяйте, что `gh` работает с правильным репозиторием. Не вставляйте значения секретов в чат. Workflow тестирует debug, установку на API 24 и 35 и отдельно проверяет подписание **временным тестовым ключом**, который не используется для публикации. При push тега `v*` release job использует секреты владельца, сверяет тег с `versionName`, проверяет подписи APK/AAB и только после прохождения тестов создаёт GitHub Release с публичным отпечатком сертификата и SHA-256. Без секретов выпуск остановится. Тестовый и debug-ключи не являются production-ключами.
