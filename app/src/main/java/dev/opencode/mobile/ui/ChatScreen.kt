@@ -45,6 +45,7 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -60,8 +61,8 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -87,7 +88,6 @@ import dev.opencode.mobile.data.Provider
 import dev.opencode.mobile.data.Role
 import dev.opencode.mobile.data.SessionSummary
 import dev.opencode.mobile.data.TodoItem
-import kotlinx.coroutines.launch
 import java.io.File
 
 private val ChatPanel = Color(0xFF1A1E28)
@@ -99,7 +99,6 @@ fun ChatScreen(vm: AppViewModel) {
     val session = ui.session
     val messages = session?.messages.orEmpty()
     val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
     var showSessions by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
     var followLatest by remember(session?.id) { mutableStateOf(true) }
@@ -117,11 +116,20 @@ fun ChatScreen(vm: AppViewModel) {
     LaunchedEffect(dragging) {
         if (!dragging) followLatest = nearBottom
     }
-    LaunchedEffect(session?.id, messages.size, messages.lastOrNull()?.content?.length) {
+    LaunchedEffect(session?.id, messages.size, followLatest, dragging) {
         if (messages.isNotEmpty() && followLatest && !dragging) {
-            listState.scrollToItem(messages.lastIndex)
-            // The last message can be taller than the viewport. Move to its end, not just its start.
-            listState.scrollBy(1_000_000f)
+            // Observe layout, not just message count: a streamed message can grow beyond the viewport.
+            snapshotFlow { listState.layoutInfo }.collect { info ->
+                if (info.totalItemsCount == messages.size) {
+                    val last = info.visibleItemsInfo.lastOrNull()
+                    if (last == null || last.index < messages.lastIndex) {
+                        listState.scrollToItem(messages.lastIndex)
+                    } else {
+                        val overflow = last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding)
+                        if (overflow > 0) listState.scrollBy(overflow.toFloat())
+                    }
+                }
+            }
         }
     }
 
@@ -134,6 +142,11 @@ fun ChatScreen(vm: AppViewModel) {
             onNew = { vm.newSession() }
         )
 
+        val rootWarning = ui.settings.allowRoot || (ui.busy && ui.runningRootAllowed)
+        val autoWarning = ui.settings.autoApproveTools || (ui.busy && ui.runningAutoApprove)
+        if (rootWarning || autoWarning) {
+            SafetyBanner(rootWarning, autoWarning, onClick = { vm.navigate(Screen.SETTINGS) })
+        }
         if (ui.todos.isNotEmpty()) TodoStrip(ui.todos)
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -150,13 +163,7 @@ fun ChatScreen(vm: AppViewModel) {
                 }
                 if (!followLatest) {
                     IconButton(
-                        onClick = {
-                            followLatest = true
-                            scope.launch {
-                                listState.scrollToItem(messages.lastIndex)
-                                listState.scrollBy(1_000_000f)
-                            }
-                        },
+                        onClick = { followLatest = true },
                         modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)
                             .background(SurfaceHigh, CircleShape)
                     ) {
@@ -297,6 +304,24 @@ private fun EmptyChat(showSuggestions: Boolean, onPrompt: (String) -> Unit) {
                 Icon(Icons.Default.ArrowUpward, null, tint = Muted, modifier = Modifier.size(15.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun SafetyBanner(rootAllowed: Boolean, autoApprove: Boolean, onClick: () -> Unit) {
+    val labels = listOfNotNull(
+        "Root разрешён".takeIf { rootAllowed },
+        "Авто-подтверждение".takeIf { autoApprove }
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(10.dp)).background(Accent2.copy(alpha = 0.1f))
+            .clickable(onClick = onClick).padding(horizontal = 11.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Outlined.WarningAmber, null, tint = Accent2, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(labels.joinToString(" · "), color = Accent2, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 2)
     }
 }
 
@@ -480,7 +505,7 @@ internal fun ChatComposer(
                 ) {
                     Column(Modifier.weight(1f, fill = false)) {
                         Text(provider.model.ifBlank { "Выберите модель" }, color = Color(0xFFE5EBFF), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(provider.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(if (busy) "${provider.name} · следующий запрос" else provider.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Icon(Icons.Default.ExpandMore, null, tint = Muted, modifier = Modifier.size(18.dp))
                 }

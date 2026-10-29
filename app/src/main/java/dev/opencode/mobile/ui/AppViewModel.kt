@@ -45,6 +45,8 @@ data class UiState(
     val session: ChatSession? = null,
     val chatDraft: String = "",
     val busy: Boolean = false,
+    val runningRootAllowed: Boolean = false,
+    val runningAutoApprove: Boolean = false,
     val status: String = "",
     val approval: PendingApproval? = null,
     val todos: List<TodoItem> = emptyList(),
@@ -299,7 +301,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val model = provider.model
         pendingOutput = StringBuilder()
         lastChunkFlush = 0L
-        ui = ui.copy(busy = true, status = "Думаю…", screen = Screen.CHAT)
+        ui = ui.copy(
+            busy = true,
+            runningRootAllowed = settings.allowRoot,
+            runningAutoApprove = settings.autoApproveTools,
+            status = "Думаю…",
+            screen = Screen.CHAT
+        )
         val runId = ++agentRunId
 
         job = viewModelScope.launch {
@@ -331,7 +339,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 }
-                ui = ui.copy(busy = false, status = "", approval = null)
+                ui = ui.copy(busy = false, runningRootAllowed = false, runningAutoApprove = false, status = "", approval = null)
                 ui.session?.let { if (!store.save(it)) ui = ui.copy(toast = "Не удалось сохранить сессию") }
                 refreshSessions()
             }

@@ -51,7 +51,9 @@ class ChatComponentsUiTest {
         rule.setContent { OpenCodeTheme { MarkdownText("```kotlin\nprintln(42)\n```") } }
         rule.onNodeWithContentDescription("Скопировать код").performClick()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        assertEquals("println(42)", clipboard.primaryClip?.getItemAt(0)?.coerceToText(context).toString())
+        rule.runOnIdle {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            assertEquals("println(42)", clipboard.primaryClip?.getItemAt(0)?.coerceToText(context).toString())
+        }
     }
 }

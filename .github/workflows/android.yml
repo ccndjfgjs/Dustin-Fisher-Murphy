@@ -149,6 +149,21 @@ jobs:
           else
             echo '::error::The emulator did not start. See the emulator action log.'
           fi
+          # Surface assertion messages and stack traces even when artifact/log downloads are unavailable.
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          for file in Path('app/build/outputs/androidTest-results').rglob('*.xml'):
+              try:
+                  root = ET.parse(file).getroot()
+              except (ET.ParseError, OSError):
+                  continue
+              for case in root.iter('testcase'):
+                  for failure in case.findall('failure') + case.findall('error'):
+                      detail = f"{case.get('classname')}.{case.get('name')}: {failure.get('message', '')}\n{failure.text or ''}"
+                      escaped = detail[:3000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print('::error::' + escaped)
+          PY
       - name: Upload emulator results
         if: always()
         uses: actions/upload-artifact@v4
